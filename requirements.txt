@@ -1,0 +1,4 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+anthropic>=0.40
+yt-dlp[default]>=2025.11.12
