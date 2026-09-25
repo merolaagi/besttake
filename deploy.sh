@@ -11,9 +11,10 @@ HOST="$(envval HOST)"; HOST="${HOST:-127.0.0.1}"
 URL="http://localhost:${PORT}"
 mkdir -p data
 
-if [ "$(envval AI_PROVIDER)" = "ollama" ]; then
-  OM="$(envval OLLAMA_MODEL)"; OM="${OM:-qwen2.5:14b}"
-  OV="$(envval OLLAMA_VISION_MODEL)"; OV="${OV:-qwen2.5vl:7b}"
+setting() { "$DIR/.venv/bin/python" -c "import sys; sys.path.insert(0, '$DIR'); from app import settings; print(settings.get('$1'))" 2>/dev/null || envval "$1"; }
+if [ "$(setting AI_PROVIDER)" = "ollama" ]; then
+  OM="$(setting OLLAMA_MODEL)"; OM="${OM:-qwen2.5:14b}"
+  OV="$(setting OLLAMA_VISION_MODEL)"; OV="${OV:-qwen2.5vl:7b}"
   if ! command -v ollama >/dev/null 2>&1; then
     echo "Installing Ollama..."
     brew install ollama || echo "Could not install Ollama. Install it from https://ollama.com and run this again."
@@ -74,5 +75,4 @@ echo "Pushing to GitHub..."
 if bash publish.sh; then :; else echo "GitHub push skipped. The app is still running at $URL"; fi
 
 echo
-echo "Ranking engine default: $(envval AI_PROVIDER). Basic (no AI) always works."
-echo "For a local model set AI_PROVIDER=ollama in $DIR/.env and run the same one-liner again."
+echo "Default ranking engine: $(setting AI_PROVIDER). Add API keys or switch engines any time in Settings ($URL/#/settings)."

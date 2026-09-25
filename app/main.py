@@ -3,14 +3,16 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+import re
+
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, llm, pipeline, scoring, templates
+from . import auth, llm, media, pipeline, scoring, settings, templates
 from . import db as dbm
-from .config import (AI_PROVIDER, ALLOW_SIGNUP, ANTHROPIC_API_KEY, COOKIE_SECURE, FREE_COURSE_LIMIT, MODEL_SMART,
-                     OLLAMA_MODEL, ROOT, VERSION)
+from . import youtube as yt
+from .config import ALLOW_SIGNUP, COOKIE_SECURE, FREE_COURSE_LIMIT, ROOT, VERSION
 from .db import db
 
 ACTIVE = ("queued", "planning", "building")
@@ -70,9 +72,9 @@ def signup(body: SignupIn, resp: Response):
         if c.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
             raise HTTPException(409, "An account with this email already exists. Sign in instead.")
         first = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        cur = c.execute("INSERT INTO users(email,name,pw_hash,plan,created_at) VALUES(?,?,?,?,?)",
+        cur = c.execute("INSERT INTO users(email,name,pw_hash,plan,is_owner,created_at) VALUES(?,?,?,?,?,?)",
                         (email, (body.name or "").strip()[:80], auth.hash_pw(body.password),
-                         "pro" if first else "free", time.time()))
+                         "pro" if first else "free", 1 if first else 0, time.time()))
         uid = cur.lastrowid
     _login_response(resp, uid)
     return {"ok": True}
@@ -99,20 +101,30 @@ def logout(request: Request, resp: Response):
 
 def engines() -> list[dict]:
     st = llm.ollama_status()
+    key = settings.get("ANTHROPIC_API_KEY")
     return [
         {"id": "none", "label": "Basic, no AI", "available": True,
-         "note": "Free and instant. Scores transcript coverage, comments, visuals and audience numbers. You give the lesson list."},
-        {"id": "ollama", "label": f"Local model ({OLLAMA_MODEL})", "available": bool(st["running"] and st["text"]),
-         "note": st["note"]},
-        {"id": "anthropic", "label": f"Claude ({MODEL_SMART})", "available": bool(ANTHROPIC_API_KEY),
-         "note": "Best judging and full lesson notes." if ANTHROPIC_API_KEY
-         else "Add ANTHROPIC_API_KEY to .env and redeploy to enable."},
+         "note": "Free. Extracts the visuals and narration; ranks by relevance, coverage, comments, visuals and audience numbers."},
+        {"id": "ollama", "label": f"Local model ({settings.get('OLLAMA_MODEL')})",
+         "available": bool(st["running"] and st["text"]), "note": st["note"]},
+        {"id": "anthropic", "label": f"Claude ({settings.get('BESTTAKE_MODEL')})", "available": bool(key),
+         "note": "Best judging, and writes each build-up step in plain words, plus a quiz." if key
+         else "Add an Anthropic API key in Settings to enable."},
     ]
 
 
 def default_engine(eng: list[dict]) -> str:
     ok = {e["id"] for e in eng if e["available"]}
-    return AI_PROVIDER if AI_PROVIDER in ok else "none"
+    want = settings.get("AI_PROVIDER")
+    return want if want in ok else "none"
+
+
+def owner_only(user=Depends(auth.current_user)):
+    with db() as c:
+        row = c.execute("SELECT is_owner FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not row or not row["is_owner"]:
+        raise HTTPException(403, "Only the owner account can change settings.")
+    return user
 
 
 @app.get("/api/me")
@@ -120,8 +132,10 @@ def me(user=Depends(auth.current_user)):
     with db() as c:
         used = c.execute("SELECT COUNT(*) FROM courses WHERE user_id=?", (user["id"],)).fetchone()[0]
     eng = engines()
+    with db() as c:
+        owner = bool(c.execute("SELECT is_owner FROM users WHERE id=?", (user["id"],)).fetchone()["is_owner"])
     return {
-        "user": user,
+        "user": dict(user, is_owner=owner),
         "usage": {"courses": used, "limit": None if user["plan"] != "free" else FREE_COURSE_LIMIT},
         "version": VERSION,
         "engines": eng,
@@ -164,7 +178,10 @@ def create_course(body: CourseIn, user=Depends(auth.current_user)):
         raise HTTPException(400, f"{eng[engine]['label']} isn't available: {eng[engine]['note']}")
     plan = templates.parse_lessons(body.lessons or "", topic)
     if engine == "none" and not plan:
-        raise HTTPException(400, "Basic mode needs a lesson list. Add one lesson per line, or pick a template.")
+        t = templates.match_template(topic)
+        if not t:
+            raise HTTPException(400, "Basic mode needs a lesson list for this topic. Add one lesson per line, or pick a template.")
+        plan = templates.parse_lessons(t["text"], topic)
     level = body.level if body.level in pipeline.LEVELS else "beginner"
     depth = body.depth if body.depth in pipeline.DEPTHS else "standard"
     profile = body.profile if body.profile in scoring.PROFILES else "balanced"
@@ -328,3 +345,57 @@ def rebuild_lesson(lid: int, user=Depends(auth.current_user)):
     dbm.log(lesson["course_id"], f"Rebuilding “{lesson['title']}”")
     pipeline.enqueue(lesson["course_id"])
     return {"ok": True}
+
+
+class SettingsIn(BaseModel):
+    values: dict = {}
+    clear: list = []
+
+
+@app.get("/api/settings")
+def get_settings(user=Depends(owner_only)):
+    return {"settings": settings.public(), "ffmpeg": bool(yt.ffmpeg_path())}
+
+
+@app.post("/api/settings")
+def save_settings(body: SettingsIn, user=Depends(owner_only)):
+    if body.values.get("AI_PROVIDER") not in (None, "none", "ollama", "anthropic"):
+        raise HTTPException(400, "Unknown engine.")
+    settings.save(body.values, body.clear)
+    return {"settings": settings.public()}
+
+
+class TestIn(BaseModel):
+    target: str
+
+
+@app.post("/api/settings/test")
+def test_settings(body: TestIn, user=Depends(owner_only)):
+    try:
+        if body.target == "anthropic":
+            return {"ok": True, "message": llm.test_anthropic()}
+        if body.target == "ollama":
+            st = llm.ollama_status()
+            return {"ok": bool(st["running"] and st["text"]), "message": st["note"]}
+        if body.target == "youtube":
+            key = settings.get("YOUTUBE_API_KEY")
+            if not key:
+                return {"ok": False, "message": "No YouTube API key saved."}
+            n = len(yt.api_search("system design caching", 3, key))
+            return {"ok": n > 0, "message": f"Connected. The test search returned {n} videos."}
+    except Exception as e:
+        return {"ok": False, "message": str(e)[:300]}
+    raise HTTPException(400, "Unknown test.")
+
+
+_MEDIA_NAME = re.compile(r"^[0-9_]+\.(jpg|mp4)$")
+
+
+@app.get("/media/{vid}/{name}")
+def media_file(vid: str, name: str, user=Depends(auth.current_user)):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", vid) or not _MEDIA_NAME.match(name):
+        raise HTTPException(404, "Not found.")
+    p = media.MEDIA_DIR / vid / name
+    if not p.exists():
+        raise HTTPException(404, "Not found.")
+    return FileResponse(p, headers={"Cache-Control": "private, max-age=86400"})

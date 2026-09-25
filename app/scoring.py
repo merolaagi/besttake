@@ -65,12 +65,13 @@ def audience(meta: dict) -> tuple[dict, dict]:
     return signals, raw
 
 
-def prelim(signals: dict, position: int) -> float:
-    return (0.45 * signals["outperformance"] + 0.25 * signals["like_rate"]
-            + 0.15 * signals["velocity"] + 0.15 * clamp(1 - position / 12))
+def prelim(signals: dict, position: int, rel: float) -> float:
+    return (0.5 * rel + 0.2 * signals["outperformance"] + 0.15 * signals["like_rate"]
+            + 0.15 * clamp(1 - position / 12))
 
 
-def combine(signals: dict, judge: dict, profile: str) -> tuple[float, dict]:
+def combine(signals: dict, judge: dict, profile: str, rel: float = 1.0) -> tuple[float, dict]:
+    """Weighted criteria, then scaled by how on-topic the video is, so an off-topic video can't win on popularity."""
     weights = PROFILES.get(profile, PROFILES["balanced"])
 
     def j(k, default=5.0):
@@ -84,5 +85,6 @@ def combine(signals: dict, judge: dict, profile: str) -> tuple[float, dict]:
         "visual": j("visual"), "comments": j("comment_evidence"),
         **{k: signals[k] for k in ("outperformance", "like_rate", "velocity", "comment_rate", "freshness")},
     }
-    contributions = {k: round(weights[k] * vals[k] * 100, 2) for k in weights}
+    factor = 0.4 + 0.6 * clamp(rel)
+    contributions = {k: round(weights[k] * vals[k] * 100 * factor, 2) for k in weights}
     return round(sum(contributions.values()), 1), contributions

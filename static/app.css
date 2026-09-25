@@ -202,3 +202,28 @@ textarea { font-size: .92rem; line-height: 1.5; resize: vertical; }
 .marks li:first-child { border-top: 0; }
 .marks .jump { font-variant-numeric: tabular-nums; text-align: left; }
 [hidden] { display: none !important; }
+
+/* Build-up viewer */
+.buildup { margin: 1.4rem 0 2rem; }
+.stage { background: #0E1014; border-radius: var(--radius-m); overflow: hidden; aspect-ratio: 16 / 9; display: grid; place-items: center; }
+.stage img, .stage video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.caption { padding: 1rem .1rem .4rem; min-height: 7.5rem; max-width: 72ch; }
+.caption h3 { font-size: 1.3rem; margin-bottom: .35rem; }
+.caption p { margin-bottom: .5rem; }
+.narr { color: var(--muted); border-left: 3px solid var(--line); padding-left: .8rem; }
+.caption details summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+.stepnav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .4rem 0 .9rem; }
+.stepnav .counter { font: 700 .95rem var(--display); color: var(--muted); }
+.filmstrip { display: flex; gap: .5rem; overflow-x: auto; padding: .3rem .1rem .6rem; scroll-snap-type: x proximity; }
+.filmstrip button { position: relative; flex: 0 0 auto; width: 132px; aspect-ratio: 16 / 9; padding: 0; border: 2px solid var(--line);
+  border-radius: var(--radius-s); overflow: hidden; background: #0E1014; scroll-snap-align: start; opacity: .7; }
+.filmstrip button:hover { opacity: 1; border-color: var(--cobalt); background: #0E1014; }
+.filmstrip button[aria-selected="true"] { opacity: 1; border-color: var(--marker); box-shadow: 0 0 0 2px var(--marker); }
+.filmstrip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.filmstrip .motion { position: absolute; right: 4px; bottom: 3px; font-size: .7rem; color: #fff; background: rgba(0,0,0,.6); border-radius: 3px; padding: 0 .3rem; }
+.credit a { color: inherit; }
+.stats .off { color: var(--danger); }
+.settings { max-width: 720px; }
+.settings section.block { border-top: 1px solid var(--line); padding-top: 1.2rem; margin: 1.6rem 0; }
+.hint.ok { color: var(--sage); }
+.hint.bad { color: var(--danger); }

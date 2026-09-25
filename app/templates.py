@@ -73,8 +73,29 @@ Dynamic programming: dynamic programming, memoization, subproblems""",
 ]
 
 
+def lesson_queries(title: str, ctx: str) -> list[str]:
+    ctx = (ctx or "").strip()
+    if ctx and ctx.lower() in title.lower():
+        return [f"{title} explained", f"{title} tutorial"]
+    return [f"{title} {ctx}".strip(), f"{title} explained {ctx}".strip()]
+
+
+def match_template(topic: str):
+    from .heuristics import keywords
+    want = set(keywords(topic))
+    best, score = None, 0.0
+    for t in TEMPLATES:
+        have = set(keywords(t["topic"] + " " + t["label"]))
+        s = len(want & have) / (len(want) or 1)
+        if s > score:
+            best, score = t, s
+    return best if score >= 0.5 else None
+
+
 def parse_lessons(text: str, topic: str, limit: int = 30) -> list[dict]:
     """Lines starting with # start a module. Other lines are lessons: 'Title: concept, concept'."""
+    from .heuristics import topic_context
+    ctx = topic_context(topic)
     modules, current = [], None
     for raw in (text or "").splitlines():
         line = raw.strip().lstrip("-*•").strip()
@@ -93,7 +114,7 @@ def parse_lessons(text: str, topic: str, limit: int = 30) -> list[dict]:
         current["lessons"].append({
             "title": title,
             "concepts": concepts[:8],
-            "queries": [f"{title} explained", f"{title} {topic}".strip()[:120]],
+            "queries": lesson_queries(title, ctx),
         })
     modules = [m for m in modules if m["lessons"]]
     count, out = 0, []

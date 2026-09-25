@@ -1,10 +1,11 @@
 import json
 import threading
+from pathlib import Path
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import heuristics, llm, scoring
+from . import heuristics, llm, media, scoring, templates
 from . import youtube as yt
 from .config import COURSE_WORKERS, DEEP_CANDIDATES, SEARCH_RESULTS
 from .db import db, log
@@ -92,10 +93,15 @@ def run_course(cid: int):
     provider = course.get("provider") or "none"
     if not has_lessons:
         if provider == "none":
-            raise RuntimeError("Basic mode needs a lesson list. Delete this course and add lessons, or pick a template.")
-        _set_course(cid, status="planning")
-        log(cid, f"Planning a zero-to-hero path with {ENGINE_NAMES[provider]}")
-        plan_curriculum(course)
+            t = templates.match_template(course["topic"])
+            if not t:
+                raise RuntimeError("Basic mode needs a lesson list. Delete this course and add lessons, or pick a template.")
+            n = insert_plan(cid, templates.parse_lessons(t["text"], course["topic"]))
+            log(cid, f"Using the built-in “{t['label']}” plan ({n} lessons)")
+        else:
+            _set_course(cid, status="planning")
+            log(cid, f"Planning a zero-to-hero path with {ENGINE_NAMES[provider]}")
+            plan_curriculum(course)
         with db() as c:
             course = dict(c.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone())
 
@@ -142,6 +148,13 @@ Return:
 
 Use exactly {n} lessons in total."""
     data = llm.ask_json(prompt, PLANNER_SYSTEM, provider=course.get("provider") or "anthropic", max_tokens=6000)
+    ctx = heuristics.topic_context(course["topic"])
+    ctx_kw = set(heuristics.keywords(ctx))
+    for m in data.get("modules") or []:
+        for l in m.get("lessons") or []:
+            qs = [q for q in (l.get("queries") or []) if isinstance(q, str) and q.strip()]
+            l["queries"] = [q if ctx_kw <= set(heuristics.keywords(q)) else f"{q} {ctx}" for q in qs] or \
+                templates.lesson_queries(l.get("title") or "", ctx)
     count = insert_plan(course["id"], data.get("modules") or [], limit=n + 2)
     if not count:
         raise RuntimeError("The planner returned no lessons. Try rephrasing the topic, or paste a lesson list.")
@@ -154,9 +167,14 @@ def build_lesson(course: dict, lesson: dict):
     provider = course.get("provider") or "none"
     concepts = json.loads(lesson["concepts"] or "[]")
     queries = json.loads(lesson["queries"] or "[]")
+    ctx = heuristics.topic_context(course["topic"])
+    title = lesson["title"]
+
+    def rel_of(m):
+        return heuristics.relevance(m, title, concepts, ctx)
 
     _set_lesson(lid, status="searching", error=None)
-    log(cid, f"Searching YouTube for “{lesson['title']}”")
+    log(cid, f"Searching YouTube for “{title}” ({', '.join(queries)})")
     found: dict[str, dict] = {}
     for q in queries:
         for pos, r in enumerate(yt.search(q, SEARCH_RESULTS)):
@@ -165,11 +183,13 @@ def build_lesson(course: dict, lesson: dict):
                 continue
             if r["id"] not in found:
                 r["position"] = pos
+                r["title_rel"] = rel_of({"title": r.get("title")})
                 found[r["id"]] = r
     if not found:
         raise RuntimeError("No usable videos found for this lesson.")
 
-    pool = sorted(found.values(), key=lambda r: r["position"])[:10]
+    ranked = sorted(found.values(), key=lambda r: -(0.7 * r["title_rel"] + 0.3 * (1 - r["position"] / 12)))
+    pool = [r for r in ranked if r["title_rel"] >= 0.2][:10] or ranked[:6]
     with ThreadPoolExecutor(max_workers=4) as ex:
         metas = list(ex.map(lambda r: _safe(yt.fetch_video, r["id"], False), pool))
     shortlist = []
@@ -177,32 +197,39 @@ def build_lesson(course: dict, lesson: dict):
         if not m:
             continue
         sig, _ = scoring.audience(m)
-        shortlist.append((scoring.prelim(sig, r["position"]), r, m))
+        rel = rel_of(m)
+        shortlist.append((scoring.prelim(sig, r["position"], rel), rel, r, m))
     shortlist.sort(key=lambda x: x[0], reverse=True)
-    shortlist = shortlist[:DEEP_CANDIDATES]
+    on_topic = [x for x in shortlist if x[1] >= 0.3]
+    dropped = len(shortlist) - len(on_topic)
+    shortlist = (on_topic if len(on_topic) >= 2 else shortlist)[:DEEP_CANDIDATES]
     if not shortlist:
         raise RuntimeError("Could not read details for any candidate video.")
+    if dropped:
+        log(cid, f"Dropped {dropped} off-topic candidate(s) for “{title}”")
 
     _set_lesson(lid, status="judging")
-    log(cid, f"Judging {len(shortlist)} candidates for “{lesson['title']}” ({ENGINE_NAMES[provider]})")
+    log(cid, f"Judging {len(shortlist)} candidates for “{title}” ({ENGINE_NAMES[provider]})")
     vision_ok = provider == "anthropic" or (provider == "ollama" and llm.ollama_status().get("vision"))
 
     def evaluate(item):
-        _, r, _m = item
+        _, _rel, r, _m = item
         meta = _safe(yt.fetch_video, r["id"], True) or _m
         sig, raw = scoring.audience(meta)
+        rel = rel_of(meta)
+        raw["relevance"] = rel
         if provider == "none":
-            judge = heuristics.judge(meta, concepts, lesson["title"])
+            judge = heuristics.judge(meta, concepts, title)
         else:
             try:
                 judge = judge_video(course, lesson, concepts, meta, provider, vision_ok)
             except Exception as e:
                 if _fatal(e):
                     raise
-                judge = heuristics.judge(meta, concepts, lesson["title"])
+                judge = heuristics.judge(meta, concepts, title)
                 judge["verdict"] = "The AI judge failed on this video, so it was scored without AI. " + judge["verdict"]
-        score, contrib = scoring.combine(sig, judge, course.get("profile") or "balanced")
-        return {"meta": meta, "signals": sig, "raw": raw, "judge": judge, "score": score, "contrib": contrib}
+        score, contrib = scoring.combine(sig, judge, course.get("profile") or "balanced", rel)
+        return {"meta": meta, "signals": sig, "raw": raw, "judge": judge, "score": score, "contrib": contrib, "rel": rel}
 
     with ThreadPoolExecutor(max_workers=1 if provider == "ollama" else 3) as ex:
         results = list(ex.map(evaluate, shortlist))
@@ -221,28 +248,51 @@ def build_lesson(course: dict, lesson: dict):
                  json.dumps(judge_public), res["score"], json.dumps(res["contrib"]), rank))
 
     winner = results[0]
-    runner = results[1] if len(results) > 1 else None
-    runner_pub = ({"id": runner["meta"]["id"], "title": runner["meta"].get("title"),
-                   "channel": runner["meta"].get("channel")} if runner else None)
-    log(cid, f"Picked “{winner['meta'].get('title', '')[:70]}” ({winner['score']}) for “{lesson['title']}”")
+    log(cid, f"Picked “{winner['meta'].get('title', '')[:70]}” ({winner['score']}) for “{title}”")
 
-    _set_lesson(lid, status="writing", winner_video=winner["meta"]["id"])
-    wj = winner["judge"] if winner["judge"].get("marks") else heuristics.judge(winner["meta"], concepts, lesson["title"])
-    basic = heuristics.basic_lesson(winner["meta"], concepts, lesson["title"], wj, runner_pub)
-    if provider == "none":
-        content = basic
-    else:
+    _set_lesson(lid, status="extracting", winner_video=winner["meta"]["id"])
+    steps, source, extract_error = [], winner, ""
+    for cand in [r for r in results if r["rel"] >= 0.3][:2] or results[:1]:
         try:
-            content = write_lesson(course, lesson, concepts, winner, provider)
-            content["concept_marks"] = basic["concept_marks"]
-            content["chapters"] = basic["chapters"]
-            content["runner_up"] = runner_pub
+            st = media.extract(cand["meta"], concepts, title, log=lambda msg: log(cid, msg))
         except Exception as e:
             if _fatal(e):
                 raise
-            log(cid, f"Notes for “{lesson['title']}” fell back to basic mode: {str(e)[:120]}")
-            content = basic
-    _set_lesson(lid, status="ready", content=json.dumps(content))
+            extract_error = str(e)[:300]
+            log(cid, f"Visual extraction failed for “{cand['meta'].get('title', '')[:50]}”: {extract_error[:150]}")
+            continue
+        if len(st) > len(steps):
+            steps, source = st, cand
+        if len(st) >= 3:
+            break
+    if source is not winner and steps:
+        log(cid, f"Using visuals from runner-up “{source['meta'].get('title', '')[:60]}” (the pick is mostly talking)")
+
+    _set_lesson(lid, status="writing")
+    sm = source["meta"]
+    marks = heuristics.coverage(sm, concepts, title)[1]
+    base = {
+        "mode": "basic",
+        "intro": "",
+        "steps": [dict(s, title=s.get("title") or f"Step {i + 1}") for i, s in enumerate(steps)],
+        "source": {"id": sm["id"], "title": sm.get("title"), "channel": sm.get("channel"),
+                   "url": f"https://www.youtube.com/watch?v={sm['id']}", "rank": results.index(source) + 1},
+        "concept_marks": marks,
+        "key_ideas": [], "diagram": "", "worked_example": "", "pitfalls": [], "quiz": [],
+        "check_yourself": "Without notes, explain " + ", ".join([m["concept"] for m in marks][:3] or [title])
+                          + " in your own words. Step back through the build-up for any part you stumble on.",
+        "extract_error": "" if steps else (extract_error or "No diagram or animation moments were found in the top videos."),
+    }
+    if provider != "none":
+        try:
+            ai = write_buildup(course, lesson, concepts, sm, steps, provider)
+            base.update(ai)
+            base["mode"] = "ai"
+        except Exception as e:
+            if _fatal(e):
+                raise
+            log(cid, f"Notes for “{title}” fell back to basic mode: {str(e)[:120]}")
+    _set_lesson(lid, status="ready", content=json.dumps(base))
 
 
 def _safe(fn, *a):
@@ -325,62 +375,61 @@ Return:
     return judge
 
 
-WRITER_SYSTEM = """You turn the best YouTube explanation of a concept into a short, rigorous lesson.
-Teach in your own words from what the video explains; never quote more than a few words of the transcript.
-The video is the main teacher; your notes frame it, reinforce it and check understanding."""
+WRITER_SYSTEM = """You turn the visuals and narration extracted from the best YouTube explanation of a concept into a
+step-by-step build-up lesson. Each step shows one extracted frame or animation. Write in your own words:
+never copy more than a few words of narration. Each step should build on the previous one, like a teacher
+adding to a whiteboard."""
 
 
-def write_lesson(course: dict, lesson: dict, concepts: list, winner: dict, provider: str) -> dict:
-    m = winner["meta"]
-    tr = m.get("transcript") or []
-    duration = int(m.get("duration") or 0)
-    budget = 14000 if provider == "ollama" else 40000
-    transcript = yt.transcript_text(tr, budget, parts=10) if tr else "(no transcript available)"
-    chapters = "\n".join(f"{yt.fmt_ts(ch['start'])} {ch['title']}" for ch in m.get("chapters") or []) or "(none)"
+def write_buildup(course: dict, lesson: dict, concepts: list, meta: dict, steps: list, provider: str) -> dict:
+    local = provider == "ollama"
+    listing = "\n".join(f"[{i}] at {yt.fmt_ts(s['t'])} ({s['kind']}): {s['text'][:500] or '(no narration)'}"
+                        for i, s in enumerate(steps)) or "(no visual steps were extracted)"
+    tr = meta.get("transcript") or []
+    transcript = yt.transcript_text(tr, 6000 if local else 16000, parts=6) if tr else "(no transcript)"
+    images = []
+    if provider == "anthropic" and steps:
+        images = _thumbs([media.MEDIA_DIR / meta["id"] / Path(s["image"]).name for s in steps[:12]])
     prompt = f"""Course: {course.get('title') or course['topic']}
 Learner: {LEVELS.get(course.get('level') or 'beginner')}
 Lesson: {lesson['title']}
 Must cover: {', '.join(concepts) or 'n/a'}
+Source video: {meta.get('title')} by {meta.get('channel')}
 
-Chosen video: {m.get('title')} by {m.get('channel')} ({yt.fmt_ts(duration)} long, {duration} seconds)
-Chapters:
-{chapters}
+Extracted visual steps (index, time, kind, narration spoken while it was on screen):
+{listing}
+{"The images attached are those steps' frames, in order." if images else ""}
 
-Timestamped transcript:
+Transcript excerpts for context:
 {transcript}
 
 Return:
-{{"hook": "1-2 sentences on why this matters",
-  "watch": [{{"start": seconds, "end": seconds, "label": "what this part shows"}}],
-  "key_ideas": [{{"title": "...", "body": "2-5 sentences, markdown allowed (**bold**, `code`, - lists)"}}],
-  "diagram": "a Mermaid flowchart (graph TD or graph LR) that captures the core structure, or empty string",
-  "worked_example": "a short concrete example in markdown (code fences allowed)",
-  "pitfalls": ["common mistakes or misconceptions"],
+{{"intro": "2 sentences: what we're building up to and why it matters",
+  "steps": [{{"id": step index, "title": "3-6 words", "explain": "2-4 sentences explaining what this visual shows and what it adds to the previous step"}}],
+  "key_ideas": [{{"title": "...", "body": "2-4 sentences, markdown allowed"}}],
+  "diagram": "a Mermaid flowchart (graph TD or graph LR) of the final structure, or empty string",
+  "worked_example": "a short concrete example in markdown",
+  "pitfalls": ["common mistakes"],
   "quiz": [{{"q": "...", "options": ["a", "b", "c", "d"], "answer": 0, "why": "..."}}],
-  "check_yourself": "one question to answer out loud to prove understanding"}}
+  "check_yourself": "one question to answer out loud"}}
 
-Rules:
-- "watch": 1-4 segments of THIS video that teach this lesson, using timestamps that exist in the transcript, within 0-{duration}. If the whole video is on-topic, use one segment for all of it.
-- 3-6 key ideas, 3-5 quiz questions that test understanding, not recall of trivia.
-- Mermaid: node ids without spaces, every label in double quotes, no parentheses outside quotes."""
-    data = llm.ask_json(prompt, WRITER_SYSTEM, provider=provider, max_tokens=5000)
-    return _clean_lesson(data, winner, duration)
-
-
-def _clean_lesson(data: dict, winner: dict, duration: int) -> dict:
-    watch = []
-    for w in data.get("watch") or []:
+Rules: keep steps in time order; drop steps that are off-topic (intros, sponsors, outros) by leaving them out; 3-5 quiz questions that test understanding.
+Mermaid: node ids without spaces, every label in double quotes."""
+    data = llm.ask_json(prompt, WRITER_SYSTEM, provider=provider, images=images, max_tokens=5000)
+    out_steps = []
+    for item in data.get("steps") or []:
         try:
-            s = max(0, int(float(w.get("start", 0))))
-            e = int(float(w.get("end", duration or s + 600)))
-            if duration:
-                e = min(e, duration)
-            if e - s >= 10:
-                watch.append({"start": s, "end": e, "label": str(w.get("label") or "Watch")[:160]})
+            i = int(item.get("id"))
         except Exception:
             continue
-    if not watch:
-        watch = [{"start": 0, "end": duration or 0, "label": "Full video"}]
+        if 0 <= i < len(steps) and not any(o["_i"] == i for o in out_steps):
+            out_steps.append(dict(steps[i], _i=i, title=str(item.get("title") or steps[i].get("title") or ""),
+                                  explain=str(item.get("explain") or "")))
+    if steps and len(out_steps) < max(2, len(steps) // 3):
+        out_steps = [dict(s, _i=i) for i, s in enumerate(steps)]
+    out_steps.sort(key=lambda s: s["t"])
+    for s in out_steps:
+        s.pop("_i", None)
     quiz = []
     for q in data.get("quiz") or []:
         if not isinstance(q, dict):
@@ -392,17 +441,35 @@ def _clean_lesson(data: dict, winner: dict, duration: int) -> dict:
             ans = 0
         if q.get("q") and len(opts) >= 2 and 0 <= ans < len(opts):
             quiz.append({"q": str(q["q"]), "options": opts, "answer": ans, "why": str(q.get("why") or "")})
-    wm = winner["meta"]
-    return {
-        "mode": "ai",
-        "hook": str(data.get("hook") or ""),
-        "watch": watch,
+    result = {
+        "intro": str(data.get("intro") or ""),
         "key_ideas": [{"title": str(k.get("title") or ""), "body": str(k.get("body") or "")}
                       for k in (data.get("key_ideas") or []) if isinstance(k, dict)][:6],
         "diagram": str(data.get("diagram") or "").strip(),
         "worked_example": str(data.get("worked_example") or ""),
         "pitfalls": [str(p) for p in (data.get("pitfalls") or [])][:6],
         "quiz": quiz[:5],
-        "check_yourself": str(data.get("check_yourself") or ""),
-        "video": {"id": wm["id"], "title": wm.get("title"), "channel": wm.get("channel"), "duration": duration},
     }
+    if out_steps:
+        result["steps"] = out_steps
+    if data.get("check_yourself"):
+        result["check_yourself"] = str(data["check_yourself"])
+    return result
+
+
+def _thumbs(paths: list) -> list[str]:
+    from PIL import Image
+    out = []
+    for p in paths:
+        try:
+            if not p.exists():
+                continue
+            t = p.with_name(p.stem + "_ai.jpg")
+            if not t.exists():
+                im = Image.open(p).convert("RGB")
+                im.thumbnail((640, 360))
+                im.save(t, quality=80)
+            out.append(str(t))
+        except Exception:
+            continue
+    return out

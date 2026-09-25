@@ -23,7 +23,7 @@ const STATUS_TEXT = {
   ready: "Ready", partial: "Ready, some lessons need a retry", failed: "Stopped", interrupted: "Paused",
 };
 const LESSON_TEXT = {
-  pending: "Waiting", searching: "Searching", judging: "Judging", writing: "Writing notes", ready: "Ready", failed: "Failed",
+  pending: "Waiting", searching: "Searching", judging: "Judging", extracting: "Extracting visuals", writing: "Writing notes", ready: "Ready", failed: "Failed",
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -107,7 +107,7 @@ function renderNav() {
   if (!state.me) { nav.innerHTML = ""; return; }
   const u = state.me.user, usage = state.me.usage;
   const plan = u.plan === "free" ? `Free plan, ${usage.courses} of ${usage.limit} courses` : "Pro";
-  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a><button class="link" id="signout">Sign out</button>`;
+  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a>${u.is_owner ? `<a href="#/settings">Settings</a>` : ""}<button class="link" id="signout">Sign out</button>`;
   document.getElementById("signout").onclick = async () => {
     await api("/api/logout", { method: "POST" }).catch(() => {});
     state.me = null; renderNav(); location.hash = "#/signin";
@@ -347,37 +347,47 @@ async function viewLesson(id) {
     return;
   }
 
-  const v = c.video;
-  const seg0 = c.watch[0];
+  const src = c.source || {};
+  const steps = c.steps || [];
+  const ytAt = (t) => `${src.url || ""}${src.url && src.url.includes("?") ? "&" : "?"}t=${Math.max(0, Math.round(t || 0))}s`;
   app.innerHTML = `<div class="split">${outlineHtml(course, outline, lesson.id)}
   <article>
     ${head}
-    <div class="player"><iframe id="player" title="${esc(v.title)}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen src="${embedUrl(v.id, seg0)}"></iframe></div>
-    <p class="credit">${esc(v.title)} by ${esc(v.channel)}. <a href="https://www.youtube.com/watch?v=${esc(v.id)}" target="_blank" rel="noopener">Open on YouTube</a></p>
-    <div class="segments" role="group" aria-label="Parts to watch">
-      ${c.watch.map((w, i) => `<button data-i="${i}" aria-pressed="${i === 0}"><b>${fmt(w.start)}–${fmt(w.end)}</b>${esc(w.label)}</button>`).join("")}
-    </div>
+    ${c.intro ? `<p class="hook">${esc(c.intro)}</p>` : ""}
+    ${steps.length ? `
+    <section class="buildup" aria-label="Step-by-step build-up">
+      <div class="stage" id="stage"></div>
+      <div class="caption" id="caption" aria-live="polite"></div>
+      <div class="stepnav">
+        <button class="ghost" id="prevstep">Previous step</button>
+        <span class="counter" id="counter"></span>
+        <button id="nextstep">Next step</button>
+      </div>
+      <div class="filmstrip" role="tablist" aria-label="All steps">
+        ${steps.map((st, i) => `<button role="tab" data-i="${i}" title="${esc(st.title || `Step ${i + 1}`)}"><img src="${esc(st.image)}" alt="" loading="lazy">${st.clip ? `<span class="motion" aria-label="animated">▶</span>` : ""}</button>`).join("")}
+      </div>
+      <p class="credit">Visuals and narration from <a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a> by ${esc(src.channel)}${src.rank > 1 ? ` (ranked #${src.rank}; the top pick had fewer visuals)` : ""}.</p>
+    </section>` : `
+    <div class="notice"><p><strong>No visuals were extracted for this lesson.</strong> ${esc(c.extract_error || "")}</p>
+      ${src.url ? `<p style="margin:0">Best source: <a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a> by ${esc(src.channel)}.</p>` : ""}
+      <button class="ghost" id="rebuild2" style="margin-top:.8rem">Try this lesson again</button></div>`}
     <div class="prose">
-      ${c.hook ? `<p class="hook">${esc(c.hook)}</p>` : ""}
       ${(c.concept_marks || []).length ? `<section class="block"><h2>Concepts in this lesson</h2><ul class="marks">
         ${c.concept_marks.map((m) => `<li>${m.start != null ? `<button class="link jump" data-t="${m.start}">${fmt(m.start)}</button>` : `<span class="muted small">${m.covered ? "mentioned" : "not found"}</span>`}<span>${esc(m.concept)}</span></li>`).join("")}
       </ul></section>` : ""}
       ${(c.key_ideas || []).length ? `<section class="block"><h2>Key ideas</h2><div class="ideas">
         ${c.key_ideas.map((k) => `<div class="idea"><h3>${esc(k.title)}</h3>${md(k.body)}</div>`).join("")}
       </div></section>` : ""}
-      ${c.diagram ? `<section class="block"><h2>The picture</h2><div class="diagram" id="diagram"></div></section>` : ""}
+      ${c.diagram ? `<section class="block"><h2>The whole picture</h2><div class="diagram" id="diagram"></div></section>` : ""}
       ${c.worked_example ? `<section class="block"><h2>Worked example</h2>${md(c.worked_example)}</section>` : ""}
       ${(c.pitfalls || []).length ? `<section class="block"><h2>Common mistakes</h2><ul>${c.pitfalls.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></section>` : ""}
       ${(c.quiz || []).length ? `<section class="block quiz" id="quiz"><h2>Check your understanding</h2>${c.quiz.map(quizQ).join("")}<p id="quizscore" class="muted"></p></section>` : ""}
       ${c.check_yourself ? `<section class="block"><h2>Explain it out loud</h2><p class="checkq">${esc(c.check_yourself)}</p></section>` : ""}
-      ${(c.chapters || []).length > 1 ? `<section class="block"><h2>Chapters</h2><ul class="marks">
-        ${c.chapters.map((ch) => `<li><button class="link jump" data-t="${ch.start}">${fmt(ch.start)}</button><span>${esc(ch.title)}</span></li>`).join("")}
-      </ul></section>` : ""}
-      ${c.mode === "basic" ? `<p class="notice small">These notes were built without AI. Switch the course to a local model or Claude to get written key ideas, a diagram and a quiz.</p>` : ""}
+      ${c.mode === "basic" ? `<p class="notice small">Built without AI: step titles come from the lesson's concepts and the text is the narrator's own words. With a local model or Claude, each step gets a plain-language explanation, plus key ideas, a diagram and a quiz.</p>` : ""}
     </div>
     <section class="block jury">
-      <h2>Why this video</h2>
-      <p class="muted">${candidates.length} videos made the shortlist. Each was scored out of 100 using the “${esc((state.me?.profiles || {})[course.profile] || course.profile)}” weighting${course.provider === "none" ? ". Scored without AI: coverage comes from matching the lesson's concepts in the transcript, visuals from analyzing sampled frames, and viewer sentiment from comment phrases. Correctness can't be checked in this mode" : ""}.</p>
+      <h2>Why this source</h2>
+      <p class="muted">${candidates.length} videos made the shortlist. Each was scored out of 100 using the “${esc((state.me?.profiles || {})[course.profile] || course.profile)}” weighting, then scaled by how on-topic it is, so a popular video from another field can't win.${course.provider === "none" ? " Scored without AI: coverage comes from matching the lesson's concepts in the transcript, visuals from analyzing sampled frames, and viewer sentiment from comment phrases. Correctness can't be checked in this mode." : ""}</p>
       ${candidates.map(candRow).join("")}
       ${legend()}
     </section>
@@ -389,26 +399,54 @@ async function viewLesson(id) {
   </article></div>`;
   wireOutline();
 
-  document.querySelectorAll(".segments button").forEach((b) => {
-    b.onclick = () => {
-      const w = c.watch[+b.dataset.i];
-      document.getElementById("player").src = embedUrl(v.id, w, true);
-      document.querySelectorAll(".segments button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  let cur = 0;
+  const show = (i) => {
+    if (!steps.length) return;
+    cur = Math.max(0, Math.min(steps.length - 1, i));
+    const st = steps[cur];
+    document.getElementById("stage").innerHTML = st.clip
+      ? `<video src="${esc(st.clip)}" poster="${esc(st.image)}" autoplay muted loop playsinline aria-label="${esc(st.title || "Animation")}"></video>`
+      : `<img src="${esc(st.image)}" alt="${esc(st.title || `Step ${cur + 1}`)}">`;
+    const body = st.explain
+      ? `<p>${esc(st.explain)}</p>${st.text ? `<details><summary>What the narrator says</summary><p class="narr">${esc(st.text)}</p></details>` : ""}`
+      : st.text ? `<p class="narr">${esc(st.text)}</p>` : "";
+    document.getElementById("caption").innerHTML = `<h3>${esc(st.title || `Step ${cur + 1}`)}</h3>${body}
+      <p class="small muted">At ${fmt(st.t)} in the source. <a href="${esc(ytAt(st.start))}" target="_blank" rel="noopener">Open this moment on YouTube</a></p>`;
+    document.getElementById("counter").textContent = `Step ${cur + 1} of ${steps.length}`;
+    document.getElementById("prevstep").disabled = cur === 0;
+    document.getElementById("nextstep").disabled = cur === steps.length - 1;
+    document.querySelectorAll(".filmstrip button").forEach((b, j) => {
+      b.setAttribute("aria-selected", String(j === cur));
+      if (j === cur) b.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  };
+  if (steps.length) {
+    document.getElementById("prevstep").onclick = () => show(cur - 1);
+    document.getElementById("nextstep").onclick = () => show(cur + 1);
+    document.querySelectorAll(".filmstrip button").forEach((b) => { b.onclick = () => show(+b.dataset.i); });
+    state.keys = (e) => {
+      if (/input|textarea|select/i.test(document.activeElement?.tagName || "")) return;
+      if (e.key === "ArrowRight") show(cur + 1);
+      if (e.key === "ArrowLeft") show(cur - 1);
     };
-  });
-
+    window.addEventListener("keydown", state.keys);
+    show(0);
+  }
   document.querySelectorAll(".jump").forEach((b) => {
     b.onclick = () => {
       const t = +b.dataset.t;
-      document.getElementById("player").src = embedUrl(v.id, { start: t, end: 0 }, true);
-      document.querySelectorAll(".segments button").forEach((x) => x.setAttribute("aria-pressed", "false"));
-      document.querySelector(".player").scrollIntoView({ behavior: "smooth", block: "center" });
+      let idx = -1;
+      steps.forEach((st, i) => { if (st.start <= t + 5) idx = i; });
+      if (idx >= 0) { show(idx); document.getElementById("stage").scrollIntoView({ behavior: "smooth", block: "center" }); }
+      else if (src.url) window.open(ytAt(t), "_blank", "noopener");
     };
   });
+  const rb = document.getElementById("rebuild2");
+  if (rb) rb.onclick = async () => { try { await api(`/api/lessons/${id}/rebuild`, { method: "POST" }); toast("Rebuilding lesson"); location.hash = `#/course/${course.id}`; } catch (ex) { toast(ex.message); } };
   if (c.diagram) renderDiagram(c.diagram);
   wireQuiz(c.quiz || [], id);
 
-  document.getElementById("done").onclick = async (e) => {
+  document.getElementById("done").onclick = async () => {
     const nowDone = !progress.completed;
     try {
       await api(`/api/lessons/${id}/progress`, { method: "POST", body: { completed: nowDone } });
@@ -416,13 +454,6 @@ async function viewLesson(id) {
       else route();
     } catch (ex) { toast(ex.message); }
   };
-}
-
-function embedUrl(vid, seg, autoplay = false) {
-  const p = new URLSearchParams({ rel: "0", modestbranding: "1" });
-  if (seg) { p.set("start", String(seg.start)); if (seg.end > seg.start) p.set("end", String(seg.end)); }
-  if (autoplay) p.set("autoplay", "1");
-  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}?${p}`;
 }
 
 function candRow(cd, i) {
@@ -433,7 +464,8 @@ function candRow(cd, i) {
     <div>
       <div class="title"><a href="${esc(cd.url)}" target="_blank" rel="noopener">${esc(cd.title)}</a></div>
       <div class="stats"><span>${esc(cd.channel)}</span><span>${fmt(cd.duration)}</span><span>${num(s.views)} views</span>
-        ${s.like_rate_pct != null ? `<span>${s.like_rate_pct}% liked</span>` : ""}<span>${num(s.views_per_sub)}× channel size</span></div>
+        ${s.like_rate_pct != null ? `<span>${s.like_rate_pct}% liked</span>` : ""}<span>${num(s.views_per_sub)}× channel size</span>
+        ${s.relevance != null ? `<span class="${s.relevance < 0.5 ? "off" : ""}">${Math.round(s.relevance * 100)}% on-topic</span>` : ""}</div>
       <div class="bar-wrap" style="margin-top:.5rem">${scoreBar(cd.contributions)}</div>
       ${j.verdict ? `<p style="margin:.5rem 0 0">${esc(j.verdict)}</p>` : ""}
       ${i === 0 && pts.length ? `<ul>${pts.join("")}</ul>` : ""}
@@ -488,10 +520,81 @@ async function renderDiagram(src) {
   }
 }
 
+
+/* ---------- Settings ---------- */
+
+async function viewSettings() {
+  if (!state.me?.user?.is_owner) { app.innerHTML = `<p class="notice">Only the owner account can change settings. <a href="#/">Back to your courses</a></p>`; return; }
+  const { settings: st, ffmpeg } = await api("/api/settings");
+  const secret = (k, label, help) => `
+    <div class="field"><label for="${k}">${label}</label>
+      <input id="${k}" type="password" autocomplete="off" placeholder="${st[k].set ? `Saved (${esc(st[k].hint)}). Type a new key to replace it.` : "Paste a key"}">
+      <p class="hint">${help}${st[k].set ? ` Saved ${st[k].source === "env" ? "in .env" : "in the app"}.` : ""}
+      ${st[k].set && st[k].source === "app" ? ` <button type="button" class="link" data-clear="${k}">Remove key</button>` : ""}</p></div>`;
+  const text = (k, label, help) => `
+    <div class="field"><label for="${k}">${label}</label><input id="${k}" value="${esc(st[k].value)}"><p class="hint">${help}</p></div>`;
+  app.innerHTML = `<div class="settings">
+    <h1>Settings</h1>
+    <p class="muted">Keys are stored on this server, in its own database, and are never shown in full again. Everything works without them in Basic mode.</p>
+    ${ffmpeg ? "" : `<p class="notice">ffmpeg isn't installed, so visuals can't be extracted. Rerun the one-liner to install it.</p>`}
+    <form id="setform">
+      <section class="block"><h2>Default ranking engine</h2>
+        <div class="field"><select id="AI_PROVIDER">
+          ${[["none", "Basic, no AI"], ["ollama", "Local model (Ollama)"], ["anthropic", "Claude"]].map(([v, l]) => `<option value="${v}" ${st.AI_PROVIDER.value === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select><p class="hint">Preselected when you build a course. Choosing Local model and rerunning the one-liner installs Ollama and downloads the models.</p></div>
+      </section>
+      <section class="block"><h2>Claude</h2>
+        ${secret("ANTHROPIC_API_KEY", "Anthropic API key", "From console.anthropic.com. Enables the Claude engine.")}
+        ${text("BESTTAKE_MODEL", "Model", "The model used for planning, judging and writing.")}
+        <button type="button" class="ghost" data-test="anthropic">Test Claude</button> <span class="hint" id="t-anthropic"></span>
+      </section>
+      <section class="block"><h2>YouTube</h2>
+        ${secret("YOUTUBE_API_KEY", "YouTube Data API key (optional)", "From Google Cloud console. Makes search faster and more reliable; without it BestTake searches through yt-dlp.")}
+        <button type="button" class="ghost" data-test="youtube">Test YouTube</button> <span class="hint" id="t-youtube"></span>
+      </section>
+      <section class="block"><h2>Local model</h2>
+        ${text("OLLAMA_URL", "Ollama address", "Where Ollama runs. The default is this Mac.")}
+        ${text("OLLAMA_MODEL", "Text model", "Plans, judges and writes. qwen2.5:14b fits comfortably on an M4 Pro.")}
+        ${text("OLLAMA_VISION_MODEL", "Vision model", "Rates how visual each candidate is from its frames.")}
+        <button type="button" class="ghost" data-test="ollama">Test local model</button> <span class="hint" id="t-ollama"></span>
+      </section>
+      <p class="error" id="seterr"></p>
+      <button type="submit">Save settings</button>
+    </form></div>`;
+  const keys = ["AI_PROVIDER", "ANTHROPIC_API_KEY", "BESTTAKE_MODEL", "YOUTUBE_API_KEY", "OLLAMA_URL", "OLLAMA_MODEL", "OLLAMA_VISION_MODEL"];
+  const clear = new Set();
+  const collect = () => Object.fromEntries(keys.map((k) => [k, document.getElementById(k).value]));
+  document.querySelectorAll("[data-clear]").forEach((b) => {
+    b.onclick = () => { clear.add(b.dataset.clear); b.closest(".hint").innerHTML = "The key will be removed when you save."; };
+  });
+  document.getElementById("setform").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/settings", { method: "POST", body: { values: collect(), clear: [...clear] } });
+      await loadMe();
+      toast("Settings saved");
+      route();
+    } catch (ex) { document.getElementById("seterr").textContent = ex.message; }
+  };
+  document.querySelectorAll("[data-test]").forEach((b) => {
+    b.onclick = async () => {
+      const out = document.getElementById("t-" + b.dataset.test);
+      out.textContent = "Saving and testing…";
+      try {
+        await api("/api/settings", { method: "POST", body: { values: collect(), clear: [] } });
+        const r = await api("/api/settings/test", { method: "POST", body: { target: b.dataset.test } });
+        out.textContent = r.message;
+        out.className = "hint " + (r.ok ? "ok" : "bad");
+      } catch (ex) { out.textContent = ex.message; out.className = "hint bad"; }
+    };
+  });
+}
+
 /* ---------- Router ---------- */
 
 async function route() {
   clearTimeout(state.poll);
+  if (state.keys) { window.removeEventListener("keydown", state.keys); state.keys = null; }
   const h = location.hash || "#/";
   try {
     if (h.startsWith("#/signin")) return viewSignin("signin");
@@ -501,6 +604,7 @@ async function route() {
     let m;
     if ((m = h.match(/^#\/course\/(\d+)/))) return await viewCourse(+m[1]);
     if ((m = h.match(/^#\/lesson\/(\d+)/))) return await viewLesson(+m[1]);
+    if (h.startsWith("#/settings")) return await viewSettings();
     return await viewHome();
   } catch (ex) {
     if (state.me) app.innerHTML = `<p class="notice">${esc(ex.message)} <a href="#/">Back to your courses</a></p>`;

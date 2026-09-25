@@ -5,6 +5,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+import urllib.parse
+
+from . import settings
 from .config import CACHE_TTL, COMMENTS_PER_VIDEO, COOKIES_FROM_BROWSER, FRAMES_DIR
 from .db import db
 
@@ -49,7 +52,50 @@ def _run(url: str, opts: dict, download: bool = False) -> dict:
         raise YouTubeError(re.sub(r"\x1b\[[0-9;]*m", "", msg)[:300]) from e
 
 
+def _iso_duration(v: str) -> int:
+    m = re.match(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", v or "")
+    if not m:
+        return 0
+    d, h, mi, s = (int(x or 0) for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + s
+
+
+def _api(path: str, params: dict) -> dict:
+    url = "https://www.googleapis.com/youtube/v3/" + path + "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=20) as r:
+        return json.loads(r.read())
+
+
+def api_search(query: str, n: int, key: str) -> list[dict]:
+    d = _api("search", {"part": "snippet", "type": "video", "maxResults": min(n, 25), "q": query,
+                        "relevanceLanguage": "en", "key": key})
+    ids = [it["id"]["videoId"] for it in d.get("items", []) if it.get("id", {}).get("videoId")]
+    if not ids:
+        return []
+    v = _api("videos", {"part": "snippet,contentDetails,statistics", "id": ",".join(ids), "key": key})
+    by_id = {it["id"]: it for it in v.get("items", [])}
+    out = []
+    for pos, vid in enumerate(ids):
+        it = by_id.get(vid)
+        if not it:
+            continue
+        out.append({"id": vid, "title": it["snippet"].get("title", ""), "channel": it["snippet"].get("channelTitle", ""),
+                    "duration": _iso_duration(it["contentDetails"].get("duration")),
+                    "view_count": int(it.get("statistics", {}).get("viewCount", 0) or 0), "position": pos})
+    return out
+
+
 def search(query: str, n: int) -> list[dict]:
+    key = settings.get("YOUTUBE_API_KEY")
+    if key:
+        try:
+            return api_search(query, n, key)
+        except Exception:
+            pass
+    return search_ytdlp(query, n)
+
+
+def search_ytdlp(query: str, n: int) -> list[dict]:
     info = _run(f"ytsearch{n}:{query}", _opts({"extract_flat": "in_playlist"}))
     out = []
     for pos, e in enumerate(info.get("entries") or []):
@@ -198,7 +244,7 @@ def parse_vtt(raw: str) -> list:
     return out
 
 
-def chunk(entries: list, window: float = 20.0) -> list:
+def chunk(entries: list, window: float = 8.0) -> list:
     out, start, buf = [], None, []
     for t, text in entries:
         if start is None:
@@ -261,3 +307,36 @@ def transcript_text(transcript: list, max_chars: int, parts: int = 6) -> str:
             j += 1
         out.append("\n".join(buf))
     return "\n[…]\n".join(out)
+
+
+def ffmpeg_path() -> str | None:
+    import shutil
+    for cand in ("ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        p = shutil.which(cand) or (cand if Path(cand).exists() else None)
+        if p:
+            return p
+    return None
+
+
+def download_video(vid: str, workdir: Path, ranges: list | None = None) -> list[tuple[Path, int]]:
+    """Downloads video only (no audio), up to 720p. Returns [(file, start_offset_seconds)]."""
+    ff = ffmpeg_path()
+    fmt = "bv*[height<=720][vcodec^=avc1]/bv*[height<=720]/b[height<=720]/bv*/b"
+    url = f"https://www.youtube.com/watch?v={vid}"
+    jobs = ranges or [None]
+    out = []
+    for i, rng in enumerate(jobs):
+        extra = {"skip_download": False, "format": fmt, "outtmpl": str(workdir / f"src{i}.%(ext)s"),
+                 "ignore_no_formats_error": False}
+        if ff:
+            extra["ffmpeg_location"] = ff
+        if rng:
+            from yt_dlp.utils import download_range_func
+            extra["download_ranges"] = download_range_func(None, [(float(rng[0]), float(rng[1]))])
+        _run(url, _opts(extra), download=True)
+        files = [p for p in workdir.glob(f"src{i}.*") if not p.name.endswith((".part", ".ytdl"))]
+        if files:
+            out.append((files[0], int(rng[0]) if rng else 0))
+    if not out:
+        raise YouTubeError("The video could not be downloaded.")
+    return out

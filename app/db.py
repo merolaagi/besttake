@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS video_cache(video_id TEXT PRIMARY KEY, data TEXT, fet
 CREATE TABLE IF NOT EXISTS progress(
   user_id INTEGER, lesson_id INTEGER, completed INTEGER DEFAULT 0, quiz_score REAL,
   updated_at REAL, PRIMARY KEY(user_id, lesson_id));
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT, updated_at REAL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, course_id INTEGER, ts REAL, msg TEXT);
 CREATE INDEX IF NOT EXISTS ix_lessons_course ON lessons(course_id);
 CREATE INDEX IF NOT EXISTS ix_cand_lesson ON candidates(lesson_id);
@@ -59,6 +60,11 @@ def init():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(courses)")}
         if "provider" not in cols:
             c.execute("ALTER TABLE courses ADD COLUMN provider TEXT DEFAULT 'anthropic'")
+        ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+        if "is_owner" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0")
+        if not c.execute("SELECT 1 FROM users WHERE is_owner=1").fetchone():
+            c.execute("UPDATE users SET is_owner=1 WHERE id=(SELECT MIN(id) FROM users)")
 
 
 def log(course_id, msg):

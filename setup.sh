@@ -22,6 +22,15 @@ if ! command -v deno >/dev/null 2>&1; then
   fi
 fi
 
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing ffmpeg (used to extract diagrams and animations)..."
+    brew install ffmpeg || echo "ffmpeg install failed. Visual extraction will not work until it is installed."
+  else
+    echo "Install ffmpeg (https://ffmpeg.org) so BestTake can extract visuals."
+  fi
+fi
+
 echo "Setting up Python environment with $PY..."
 [ -d .venv ] || "$PY" -m venv .venv
 .venv/bin/pip install --upgrade pip -q

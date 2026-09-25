@@ -1,8 +1,23 @@
 # BestTake
 
-Learn anything from the best explanation on YouTube.
+Learn anything from the best explanation on YouTube, as a step-by-step visual build-up rather than a whole video.
 
 Name a topic and BestTake builds a zero-to-hero course. For every lesson it searches YouTube, shortlists candidates, has a Claude "jury" score each one, and teaches the lesson with the winning video. It embeds the exact segments to watch, then adds key ideas, a diagram, a worked example, common mistakes, a quiz, and an "explain it out loud" check.
+
+## What a lesson is
+
+BestTake downloads the winning video (video only, up to 720p) and samples one frame per second in the parts that teach the lesson. It then:
+
+- keeps the frames that look drawn (diagrams, graphs, slides, code) and drops talking heads and duplicates
+- splits them into steps at cuts and inside long animations, using each step's final, fully built frame
+- cuts a short looping clip for steps that animate
+- pairs every step with the narration spoken while it was on screen
+
+In the lesson you step through the build-up with a filmstrip, and each step links to that moment on YouTube. With an AI engine, each step also gets a plain-language explanation, plus key ideas, a diagram, and a quiz. If the top video is mostly talking, the visuals come from the runner-up.
+
+Search is anchored to the course topic (for example, "Caching system design"), and every candidate gets an on-topic score. Off-topic videos are dropped before judging, and the final score is scaled by relevance, so a popular video from another field can't win.
+
+Extracted media is stored in `data/media` and only served to signed-in users. Treat it as personal study material. Re-hosting creators' clips for paying customers is a copyright question worth settling before selling access.
 
 ## Ranking engines
 
@@ -11,8 +26,8 @@ You choose the engine per course when you build it:
 | Engine | Cost | What you get |
 |---|---|---|
 | **Basic, no AI** (default) | Free, instant | You give the lesson list (or pick a template). Scoring covers concept coverage in the transcript, a teaching proxy (examples, reasons, pace, chapters), comment sentiment, visuals from frame analysis, and audience numbers. Lessons show the best segments, concept jump links, and chapters. It can't check correctness. |
-| **Local model** (Ollama) | Free, runs on the Mac | Plans the course, judges like Claude does, and writes key ideas, a diagram, and a quiz. Slower, and a notch weaker at judging correctness. Set `AI_PROVIDER=ollama` in `.env` and redeploy; deploy installs Ollama and pulls `qwen2.5:14b` and `qwen2.5vl:7b`. |
-| **Claude** | API usage | The strongest judging and notes. Add `ANTHROPIC_API_KEY`. |
+| **Local model** (Ollama) | Free, runs on the Mac | Plans the course, judges like Claude does, and writes key ideas, a diagram, and a quiz. Slower, and a notch weaker at judging correctness. Choose it as the default in Settings and rerun the one-liner; deploy installs Ollama and pulls `qwen2.5:14b` and `qwen2.5vl:7b`. |
+| **Claude** | API usage | The strongest judging and notes. Add your key in Settings. |
 
 If an AI step fails on one video, BestTake scores that video with Basic mode instead of failing the lesson. Your own model can be added as another engine in `app/llm.py`.
 

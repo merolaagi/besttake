@@ -35,10 +35,64 @@ def clamp(x, lo=0.0, hi=10.0):
 
 
 def stem(w: str) -> str:
-    for suf in ("ing", "ies", "es", "s", "ed"):
-        if len(w) > 5 and w.endswith(suf):
-            return w[: -len(suf)]
+    if len(w) > 4:
+        if w.endswith("ies") and len(w) > 5:
+            w = w[:-3] + "y"
+        else:
+            for suf in ("ings", "ing", "ied", "es", "ed", "s"):
+                if w.endswith(suf) and len(w) - len(suf) >= 3:
+                    w = w[: -len(suf)]
+                    break
+        if w.endswith("e") and len(w) > 4:
+            w = w[:-1]
     return w
+
+
+GENERIC_TOPIC = {"foundations", "foundation", "basics", "fundamentals", "introduction", "intro", "course", "complete",
+                 "guide", "beginners", "beginner", "essentials", "crash", "masterclass", "tutorial", "101", "zero", "hero"}
+
+
+def topic_context(topic: str) -> str:
+    head = (topic or "").split(":")[0]
+    words = [w for w in re.findall(r"[A-Za-z0-9+#]+", head) if w.lower() not in GENERIC_TOPIC]
+    return " ".join(words).strip().lower() or (topic or "").lower()
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[-_/]", " ", (s or "").lower())
+
+
+def relevance(meta: dict, lesson_title: str, concepts: list, ctx: str) -> float:
+    """0..1: is this video about THIS lesson inside THIS topic (not a same-word topic from another field)?"""
+    meta_text = " ".join([meta.get("title") or "", " ".join(meta.get("tags") or []),
+                          (meta.get("description") or "")[:800],
+                          " ".join(ch.get("title", "") for ch in meta.get("chapters") or [])])
+    meta_kw = set(keywords(meta_text))
+    tr_text = " ".join(t for _, t in (meta.get("transcript") or []))
+    tr_kw = set(keywords(tr_text)) if tr_text else set()
+    lesson_kw = list(dict.fromkeys(keywords(lesson_title))) or [k for c in concepts or [] for k in keywords(c)][:4]
+    if lesson_kw:
+        lesson_hit = sum(k in meta_kw for k in lesson_kw) / len(lesson_kw)
+        if tr_kw:
+            lesson_hit = max(lesson_hit, 0.8 * sum(k in tr_kw for k in lesson_kw) / len(lesson_kw))
+    else:
+        lesson_hit = 0.5
+    ctx_kw = list(dict.fromkeys(keywords(ctx)))
+    phrase = _norm(ctx).strip()
+    if not ctx_kw:
+        topic = 1.0
+    elif phrase and phrase in _norm(meta_text):
+        topic = 1.0
+    elif all(k in meta_kw for k in ctx_kw):
+        topic = 0.9
+    elif tr_text and phrase and phrase in _norm(tr_text):
+        topic = 0.8
+    elif tr_kw and all(k in tr_kw for k in ctx_kw):
+        topic = 0.7
+    else:
+        pool = meta_kw | tr_kw
+        topic = 0.5 * sum(k in pool for k in ctx_kw) / len(ctx_kw)
+    return round((0.3 + 0.7 * lesson_hit) * (0.25 + 0.75 * topic), 3)
 
 
 def keywords(text: str) -> list[str]:
