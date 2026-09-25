@@ -37,6 +37,11 @@ if [ ! -f .env ]; then
   fi
 fi
 
+if grep -qE '^PORT=8420$' .env; then
+  sed -i '' 's/^PORT=8420$/PORT=47823/' .env 2>/dev/null || sed -i 's/^PORT=8420$/PORT=47823/' .env
+  echo "Moved BestTake to port 47823."
+fi
+
 if ! grep -qE '^ANTHROPIC_API_KEY=.+' .env; then
   echo
   echo "Almost there. Add your Anthropic API key to $(pwd)/.env"

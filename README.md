@@ -33,7 +33,7 @@ Videos are embedded with YouTube's player (youtube-nocookie), not re-hosted, so 
 ./setup.sh
 ```
 
-This creates `.venv`, installs dependencies (plus Deno via Homebrew, which yt-dlp now needs for YouTube), creates `.env`, and starts the server at http://localhost:8420. Later runs only need `./run.sh`.
+This creates `.venv`, installs dependencies (plus Deno via Homebrew, which yt-dlp now needs for YouTube), creates `.env`, and starts the server at http://localhost:47823. Later runs only need `./run.sh`.
 
 Put your key in `.env`:
 
@@ -55,7 +55,7 @@ The first account you create becomes the owner, on the Pro plan. Later sign-ups 
 | Key | Default | |
 |---|---|---|
 | `BESTTAKE_MODEL` | `claude-sonnet-5` | Planner, jury, and lesson writer |
-| `PORT` / `HOST` | `8420` / `127.0.0.1` | Point a Cloudflare Tunnel ingress at `http://localhost:8420` |
+| `PORT` / `HOST` | `47823` / `127.0.0.1` | Point a Cloudflare Tunnel ingress at `http://localhost:47823` |
 | `COOKIE_SECURE` | `0` | Set to `1` when served over HTTPS (for example, behind the tunnel) |
 | `ALLOW_SIGNUP` | `1` | Set to `0` to close sign-ups |
 | `FREE_COURSE_LIMIT` | `3` | |

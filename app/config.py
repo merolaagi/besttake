@@ -27,7 +27,7 @@ MODEL_FAST = os.getenv("BESTTAKE_MODEL_FAST", "claude-haiku-4-5-20251001")
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "besttake.db"
 FRAMES_DIR = DATA_DIR / "frames"
-PORT = int(os.getenv("PORT", "8420"))
+PORT = int(os.getenv("PORT", "47823"))
 FREE_COURSE_LIMIT = int(os.getenv("FREE_COURSE_LIMIT", "3"))
 ALLOW_SIGNUP = os.getenv("ALLOW_SIGNUP", "1") == "1"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
