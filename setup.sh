@@ -43,11 +43,6 @@ if grep -qE '^PORT=8420$' .env; then
 fi
 
 if ! grep -qE '^ANTHROPIC_API_KEY=.+' .env; then
-  echo
-  echo "Almost there. Add your Anthropic API key to $(pwd)/.env"
-  echo "  ANTHROPIC_API_KEY=sk-ant-..."
-  echo "Then start BestTake with: $(pwd)/run.sh"
-  exit 0
+  echo "Note: no ANTHROPIC_API_KEY in $(pwd)/.env yet. The app will run, but building courses needs the key."
 fi
-
-exec ./run.sh
+echo "Setup complete."

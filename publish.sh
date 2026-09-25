@@ -14,6 +14,7 @@ git rev-parse -q --verify "refs/tags/v${VER}" >/dev/null || git tag "v${VER}"
 
 if ! git remote get-url origin >/dev/null 2>&1; then
   command -v gh >/dev/null 2>&1 || { echo "Install the GitHub CLI first: brew install gh && gh auth login"; exit 1; }
+  gh auth status >/dev/null 2>&1 || { echo "Sign in to GitHub first: gh auth login"; exit 1; }
   OWNER="$(gh api user -q .login)"
   if gh repo view "${OWNER}/${REPO}" >/dev/null 2>&1; then
     git remote add origin "https://github.com/${OWNER}/${REPO}.git"

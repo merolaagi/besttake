@@ -30,10 +30,10 @@ Videos are embedded with YouTube's player (youtube-nocookie), not re-hosted, so 
 ## Run
 
 ```
-./setup.sh
+bash deploy.sh
 ```
 
-This creates `.venv`, installs dependencies (plus Deno via Homebrew, which yt-dlp now needs for YouTube), creates `.env`, and starts the server at http://localhost:47823. Later runs only need `./run.sh`.
+This one command sets everything up (`.venv`, dependencies, Deno via Homebrew for yt-dlp, and `.env`). It then restarts the server in the background at http://localhost:47823, waits until it's healthy, opens it in your browser, and pushes to GitHub. The server log is in `data/server.log`. `./run.sh` runs the server in the foreground instead.
 
 Put your key in `.env`:
 

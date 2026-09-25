@@ -12,4 +12,4 @@ if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/
 fi
 echo "BestTake $(cat VERSION) is running at http://localhost:${PORT}"
 echo "The first account you create becomes the owner account (Pro plan)."
-exec .venv/bin/uvicorn app.main:app --host "$HOST" --port "$PORT"
+exec "$(pwd)/.venv/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT"
