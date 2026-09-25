@@ -140,7 +140,7 @@ def fetch_video(vid: str, deep: bool = False) -> dict:
             if c.get("parent", "root") == "root"
         ]
         data["transcript"] = _read_subs(Path(tmp))
-    data["frames"] = _storyboard_frames(info, vid)
+    data["frames"], data["frame_grid"] = _storyboard_frames(info, vid)
     data["deep"] = True
     _cache_put(vid, data)
     return data
@@ -217,7 +217,7 @@ def _storyboard_frames(info: dict, vid: str) -> list:
               if (f.get("format_note") == "storyboard" or str(f.get("format_id", "")).startswith("sb"))
               and f.get("fragments")]
     if not boards:
-        return []
+        return [], None
     best = max(boards, key=lambda f: (f.get("width") or 0) * (f.get("height") or 0))
     frags = best["fragments"]
     picks = sorted({min(len(frags) - 1, int(len(frags) * r)) for r in (0.15, 0.5, 0.85)})
@@ -236,7 +236,8 @@ def _storyboard_frames(info: dict, vid: str) -> list:
             paths.append(str(p))
         except Exception:
             continue
-    return paths
+    grid = [best.get("rows") or 1, best.get("columns") or 1]
+    return paths, grid
 
 
 def fmt_ts(sec) -> str:

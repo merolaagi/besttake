@@ -4,7 +4,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import llm, scoring
+from . import heuristics, llm, scoring
 from . import youtube as yt
 from .config import COURSE_WORKERS, DEEP_CANDIDATES, SEARCH_RESULTS
 from .db import db, log
@@ -15,6 +15,7 @@ LEVELS = {
     "intermediate": "someone with some background who wants depth",
     "advanced": "an experienced practitioner filling gaps",
 }
+ENGINE_NAMES = {"none": "Basic (no AI)", "ollama": "Local model", "anthropic": "Claude"}
 
 _executor = ThreadPoolExecutor(max_workers=max(1, COURSE_WORKERS))
 _running: set[int] = set()
@@ -61,13 +62,39 @@ def _set_lesson(lid, **fields):
         c.execute(f"UPDATE lessons SET {cols} WHERE id=?", (*fields.values(), lid))
 
 
+def _fatal(e: Exception) -> bool:
+    return isinstance(e, llm.ProviderUnavailable) or "sign-in check" in str(e)
+
+
+def insert_plan(course_id: int, modules: list, limit: int = 30) -> int:
+    rows = []
+    for mi, m in enumerate(modules or []):
+        for li, l in enumerate(m.get("lessons") or []):
+            if not l.get("title") or len(rows) >= limit:
+                continue
+            queries = [q for q in (l.get("queries") or []) if isinstance(q, str) and q.strip()][:2]
+            if not queries:
+                queries = [f"{l['title']} explained"]
+            concepts = [str(x) for x in (l.get("concepts") or []) if str(x).strip()] or [l["title"]]
+            rows.append((course_id, mi, m.get("title") or f"Part {mi + 1}", li, l["title"][:160],
+                         json.dumps(concepts[:8]), json.dumps(queries)))
+    with db() as c:
+        c.executemany(
+            "INSERT INTO lessons(course_id,module_idx,module_title,idx,title,concepts,queries,status) "
+            "VALUES(?,?,?,?,?,?,?,'pending')", rows)
+    return len(rows)
+
+
 def run_course(cid: int):
     with db() as c:
         course = dict(c.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone())
         has_lessons = c.execute("SELECT COUNT(*) FROM lessons WHERE course_id=?", (cid,)).fetchone()[0]
+    provider = course.get("provider") or "none"
     if not has_lessons:
+        if provider == "none":
+            raise RuntimeError("Basic mode needs a lesson list. Delete this course and add lessons, or pick a template.")
         _set_course(cid, status="planning")
-        log(cid, "Planning a zero-to-hero path")
+        log(cid, f"Planning a zero-to-hero path with {ENGINE_NAMES[provider]}")
         plan_curriculum(course)
         with db() as c:
             course = dict(c.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone())
@@ -83,7 +110,7 @@ def run_course(cid: int):
             traceback.print_exc()
             _set_lesson(lesson["id"], status="failed", error=str(e)[:500])
             log(cid, f"“{lesson['title']}” failed: {str(e)[:200]}")
-            if "ANTHROPIC_API_KEY" in str(e) or "sign-in check" in str(e):
+            if _fatal(e):
                 raise
 
     with db() as c:
@@ -114,30 +141,17 @@ Return:
   "modules": [{{"title": "...", "lessons": [{{"title": "...", "concepts": ["..."], "queries": ["...", "..."]}}]}}]}}
 
 Use exactly {n} lessons in total."""
-    data = llm.ask_json(prompt, PLANNER_SYSTEM, max_tokens=6000)
-    rows = []
-    for mi, m in enumerate(data.get("modules") or []):
-        for li, l in enumerate(m.get("lessons") or []):
-            if not l.get("title"):
-                continue
-            queries = [q for q in (l.get("queries") or []) if isinstance(q, str) and q.strip()][:2]
-            if not queries:
-                queries = [f"{l['title']} explained"]
-            rows.append((course["id"], mi, m.get("title") or f"Part {mi + 1}", li, l["title"],
-                         json.dumps(l.get("concepts") or []), json.dumps(queries)))
-    if not rows:
-        raise RuntimeError("The planner returned no lessons. Try rephrasing the topic.")
-    rows = rows[: n + 2]
-    with db() as c:
-        c.executemany(
-            "INSERT INTO lessons(course_id,module_idx,module_title,idx,title,concepts,queries,status) "
-            "VALUES(?,?,?,?,?,?,?,'pending')", rows)
+    data = llm.ask_json(prompt, PLANNER_SYSTEM, provider=course.get("provider") or "anthropic", max_tokens=6000)
+    count = insert_plan(course["id"], data.get("modules") or [], limit=n + 2)
+    if not count:
+        raise RuntimeError("The planner returned no lessons. Try rephrasing the topic, or paste a lesson list.")
     _set_course(course["id"], title=data.get("title") or course["topic"], summary=data.get("summary") or "")
-    log(course["id"], f"Planned {len(rows)} lessons")
+    log(course["id"], f"Planned {count} lessons")
 
 
 def build_lesson(course: dict, lesson: dict):
     cid, lid = course["id"], lesson["id"]
+    provider = course.get("provider") or "none"
     concepts = json.loads(lesson["concepts"] or "[]")
     queries = json.loads(lesson["queries"] or "[]")
 
@@ -162,7 +176,7 @@ def build_lesson(course: dict, lesson: dict):
     for r, m in zip(pool, metas):
         if not m:
             continue
-        sig, raw = scoring.audience(m)
+        sig, _ = scoring.audience(m)
         shortlist.append((scoring.prelim(sig, r["position"]), r, m))
     shortlist.sort(key=lambda x: x[0], reverse=True)
     shortlist = shortlist[:DEEP_CANDIDATES]
@@ -170,23 +184,27 @@ def build_lesson(course: dict, lesson: dict):
         raise RuntimeError("Could not read details for any candidate video.")
 
     _set_lesson(lid, status="judging")
-    log(cid, f"Judging {len(shortlist)} candidates for “{lesson['title']}”")
+    log(cid, f"Judging {len(shortlist)} candidates for “{lesson['title']}” ({ENGINE_NAMES[provider]})")
+    vision_ok = provider == "anthropic" or (provider == "ollama" and llm.ollama_status().get("vision"))
 
     def evaluate(item):
         _, r, _m = item
         meta = _safe(yt.fetch_video, r["id"], True) or _m
         sig, raw = scoring.audience(meta)
-        try:
-            judge = judge_video(course, lesson, concepts, meta)
-        except Exception as e:
-            if "ANTHROPIC_API_KEY" in str(e):
-                raise
-            judge = {"verdict": f"Could not be judged: {str(e)[:120]}", "judge_error": True,
-                     "teaching": 3, "correctness": 3, "coverage": 3, "visual": 3, "comment_evidence": 3}
+        if provider == "none":
+            judge = heuristics.judge(meta, concepts, lesson["title"])
+        else:
+            try:
+                judge = judge_video(course, lesson, concepts, meta, provider, vision_ok)
+            except Exception as e:
+                if _fatal(e):
+                    raise
+                judge = heuristics.judge(meta, concepts, lesson["title"])
+                judge["verdict"] = "The AI judge failed on this video, so it was scored without AI. " + judge["verdict"]
         score, contrib = scoring.combine(sig, judge, course.get("profile") or "balanced")
         return {"meta": meta, "signals": sig, "raw": raw, "judge": judge, "score": score, "contrib": contrib}
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=1 if provider == "ollama" else 3) as ex:
         results = list(ex.map(evaluate, shortlist))
     results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -194,19 +212,36 @@ def build_lesson(course: dict, lesson: dict):
         c.execute("DELETE FROM candidates WHERE lesson_id=?", (lid,))
         for rank, res in enumerate(results, 1):
             m = res["meta"]
+            judge_public = {k: v for k, v in res["judge"].items() if k != "marks"}
             c.execute(
                 "INSERT INTO candidates(lesson_id,video_id,title,channel,url,duration,meta,signals,judge,score,"
                 "contributions,rank) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (lid, m["id"], m.get("title"), m.get("channel"), f"https://www.youtube.com/watch?v={m['id']}",
                  m.get("duration"), json.dumps(_public_meta(m)), json.dumps(res["raw"]),
-                 json.dumps(res["judge"]), res["score"], json.dumps(res["contrib"]), rank))
+                 json.dumps(judge_public), res["score"], json.dumps(res["contrib"]), rank))
 
     winner = results[0]
     runner = results[1] if len(results) > 1 else None
+    runner_pub = ({"id": runner["meta"]["id"], "title": runner["meta"].get("title"),
+                   "channel": runner["meta"].get("channel")} if runner else None)
     log(cid, f"Picked “{winner['meta'].get('title', '')[:70]}” ({winner['score']}) for “{lesson['title']}”")
 
     _set_lesson(lid, status="writing", winner_video=winner["meta"]["id"])
-    content = write_lesson(course, lesson, concepts, winner, runner)
+    wj = winner["judge"] if winner["judge"].get("marks") else heuristics.judge(winner["meta"], concepts, lesson["title"])
+    basic = heuristics.basic_lesson(winner["meta"], concepts, lesson["title"], wj, runner_pub)
+    if provider == "none":
+        content = basic
+    else:
+        try:
+            content = write_lesson(course, lesson, concepts, winner, provider)
+            content["concept_marks"] = basic["concept_marks"]
+            content["chapters"] = basic["chapters"]
+            content["runner_up"] = runner_pub
+        except Exception as e:
+            if _fatal(e):
+                raise
+            log(cid, f"Notes for “{lesson['title']}” fell back to basic mode: {str(e)[:120]}")
+            content = basic
     _set_lesson(lid, status="ready", content=json.dumps(content))
 
 
@@ -236,17 +271,22 @@ comment_evidence: 8-10 many specific comments saying it finally made the idea cl
 
 Be a tough, fair judge. Popularity is scored elsewhere; ignore it here."""
 
+VISION_SYSTEM = """You rate how visually a video teaches, from storyboard contact sheets (grids of small frames sampled across the video).
+0-3 mostly talking head or static text; 4-6 slides or static diagrams; 7-10 diagrams that build up step by step or animations with clear labels."""
 
-def judge_video(course: dict, lesson: dict, concepts: list, meta: dict) -> dict:
+
+def judge_video(course: dict, lesson: dict, concepts: list, meta: dict, provider: str, vision_ok: bool) -> dict:
+    local = provider == "ollama"
     tr = meta.get("transcript") or []
-    transcript = yt.transcript_text(tr, 14000) if tr else "(no transcript available)"
-    comments = sorted(meta.get("comments") or [], key=lambda c: c.get("likes", 0), reverse=True)[:40]
+    transcript = yt.transcript_text(tr, 8000 if local else 14000) if tr else "(no transcript available)"
+    comments = sorted(meta.get("comments") or [], key=lambda c: c.get("likes", 0), reverse=True)[:25 if local else 40]
     comments_txt = "\n".join(f"- ({c.get('likes', 0)} likes) {c['text'][:300]}" for c in comments) or "(no comments)"
     chapters = "\n".join(f"{yt.fmt_ts(ch['start'])} {ch['title']}" for ch in meta.get("chapters") or []) or "(none)"
     frames = meta.get("frames") or []
+    inline_frames = frames if (provider == "anthropic" and frames) else []
     frames_note = (f"The {len(frames)} images are storyboard contact sheets: grids of small frames sampled "
-                   f"from early, middle and late in the video." if frames
-                   else "No frames are available; estimate the visual score from transcript cues and keep it near 5 if unclear.")
+                   f"from early, middle and late in the video." if inline_frames
+                   else "No frames are attached; score visual from transcript cues, near 5 if unclear. It may be rescored separately.")
     prompt = f"""Course: {course['topic']} (learner: {LEVELS.get(course.get('level') or 'beginner')})
 Lesson: {lesson['title']}
 Required concepts: {', '.join(concepts) or 'n/a'}
@@ -268,7 +308,21 @@ Return:
   "visual_notes": "one sentence on how it looks", "comment_notes": "one sentence on what viewers say",
   "strengths": ["up to 3 short points"], "weaknesses": ["up to 3 short points"],
   "verdict": "one sentence on why a learner should or should not use this video for this lesson"}}"""
-    return llm.ask_json(prompt, JUDGE_SYSTEM, images=frames, max_tokens=1200)
+    judge = llm.ask_json(prompt, JUDGE_SYSTEM, provider=provider, images=inline_frames, max_tokens=1200)
+
+    if provider == "ollama":
+        if frames and vision_ok:
+            try:
+                v = llm.ask_json('Return {"visual": 0-10, "visual_notes": "one sentence"}', VISION_SYSTEM,
+                                 provider="ollama", images=frames, max_tokens=200, vision=True)
+                judge["visual"], judge["visual_notes"] = v.get("visual", judge.get("visual")), v.get("visual_notes", "")
+            except Exception as e:
+                if _fatal(e):
+                    raise
+                judge["visual"], judge["visual_notes"] = heuristics.visual(meta)
+        else:
+            judge["visual"], judge["visual_notes"] = heuristics.visual(meta)
+    return judge
 
 
 WRITER_SYSTEM = """You turn the best YouTube explanation of a concept into a short, rigorous lesson.
@@ -276,11 +330,12 @@ Teach in your own words from what the video explains; never quote more than a fe
 The video is the main teacher; your notes frame it, reinforce it and check understanding."""
 
 
-def write_lesson(course: dict, lesson: dict, concepts: list, winner: dict, runner: dict | None) -> dict:
+def write_lesson(course: dict, lesson: dict, concepts: list, winner: dict, provider: str) -> dict:
     m = winner["meta"]
     tr = m.get("transcript") or []
     duration = int(m.get("duration") or 0)
-    transcript = yt.transcript_text(tr, 40000, parts=10) if tr else "(no transcript available)"
+    budget = 14000 if provider == "ollama" else 40000
+    transcript = yt.transcript_text(tr, budget, parts=10) if tr else "(no transcript available)"
     chapters = "\n".join(f"{yt.fmt_ts(ch['start'])} {ch['title']}" for ch in m.get("chapters") or []) or "(none)"
     prompt = f"""Course: {course.get('title') or course['topic']}
 Learner: {LEVELS.get(course.get('level') or 'beginner')}
@@ -308,11 +363,11 @@ Rules:
 - "watch": 1-4 segments of THIS video that teach this lesson, using timestamps that exist in the transcript, within 0-{duration}. If the whole video is on-topic, use one segment for all of it.
 - 3-6 key ideas, 3-5 quiz questions that test understanding, not recall of trivia.
 - Mermaid: node ids without spaces, every label in double quotes, no parentheses outside quotes."""
-    data = llm.ask_json(prompt, WRITER_SYSTEM, max_tokens=5000)
-    return _clean_lesson(data, winner, runner, duration)
+    data = llm.ask_json(prompt, WRITER_SYSTEM, provider=provider, max_tokens=5000)
+    return _clean_lesson(data, winner, duration)
 
 
-def _clean_lesson(data: dict, winner: dict, runner: dict | None, duration: int) -> dict:
+def _clean_lesson(data: dict, winner: dict, duration: int) -> dict:
     watch = []
     for w in data.get("watch") or []:
         try:
@@ -328,6 +383,8 @@ def _clean_lesson(data: dict, winner: dict, runner: dict | None, duration: int) 
         watch = [{"start": 0, "end": duration or 0, "label": "Full video"}]
     quiz = []
     for q in data.get("quiz") or []:
+        if not isinstance(q, dict):
+            continue
         opts = [str(o) for o in (q.get("options") or [])][:6]
         try:
             ans = int(q.get("answer", 0))
@@ -337,6 +394,7 @@ def _clean_lesson(data: dict, winner: dict, runner: dict | None, duration: int) 
             quiz.append({"q": str(q["q"]), "options": opts, "answer": ans, "why": str(q.get("why") or "")})
     wm = winner["meta"]
     return {
+        "mode": "ai",
         "hook": str(data.get("hook") or ""),
         "watch": watch,
         "key_ideas": [{"title": str(k.get("title") or ""), "body": str(k.get("body") or "")}
@@ -347,6 +405,4 @@ def _clean_lesson(data: dict, winner: dict, runner: dict | None, duration: int) 
         "quiz": quiz[:5],
         "check_yourself": str(data.get("check_yourself") or ""),
         "video": {"id": wm["id"], "title": wm.get("title"), "channel": wm.get("channel"), "duration": duration},
-        "runner_up": ({"id": runner["meta"]["id"], "title": runner["meta"].get("title"),
-                       "channel": runner["meta"].get("channel")} if runner else None),
     }

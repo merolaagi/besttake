@@ -56,6 +56,9 @@ def init():
     FRAMES_DIR.mkdir(parents=True, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(courses)")}
+        if "provider" not in cols:
+            c.execute("ALTER TABLE courses ADD COLUMN provider TEXT DEFAULT 'anthropic'")
 
 
 def log(course_id, msg):

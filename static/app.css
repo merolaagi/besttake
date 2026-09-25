@@ -191,3 +191,14 @@ section.block { margin: 2.2rem 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.hint { font-size: .84rem; color: var(--muted); margin: .35rem 0 0; }
+.labelrow { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin-bottom: .3rem; }
+.labelrow label { margin: 0; }
+.labelrow select { width: auto; font-size: .88rem; padding: .35rem .5rem; }
+textarea { font-size: .92rem; line-height: 1.5; resize: vertical; }
+.marks { list-style: none; padding: 0; margin: 0; }
+.marks li { display: grid; grid-template-columns: 4.5rem 1fr; gap: .6rem; padding: .3rem 0; border-top: 1px solid var(--line); }
+.marks li:first-child { border-top: 0; }
+.marks .jump { font-variant-numeric: tabular-nums; text-align: left; }
+[hidden] { display: none !important; }

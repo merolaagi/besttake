@@ -4,6 +4,18 @@ Learn anything from the best explanation on YouTube.
 
 Name a topic and BestTake builds a zero-to-hero course. For every lesson it searches YouTube, shortlists candidates, has a Claude "jury" score each one, and teaches the lesson with the winning video. It embeds the exact segments to watch, then adds key ideas, a diagram, a worked example, common mistakes, a quiz, and an "explain it out loud" check.
 
+## Ranking engines
+
+You choose the engine per course when you build it:
+
+| Engine | Cost | What you get |
+|---|---|---|
+| **Basic, no AI** (default) | Free, instant | You give the lesson list (or pick a template). Scoring covers concept coverage in the transcript, a teaching proxy (examples, reasons, pace, chapters), comment sentiment, visuals from frame analysis, and audience numbers. Lessons show the best segments, concept jump links, and chapters. It can't check correctness. |
+| **Local model** (Ollama) | Free, runs on the Mac | Plans the course, judges like Claude does, and writes key ideas, a diagram, and a quiz. Slower, and a notch weaker at judging correctness. Set `AI_PROVIDER=ollama` in `.env` and redeploy; deploy installs Ollama and pulls `qwen2.5:14b` and `qwen2.5vl:7b`. |
+| **Claude** | API usage | The strongest judging and notes. Add `ANTHROPIC_API_KEY`. |
+
+If an AI step fails on one video, BestTake scores that video with Basic mode instead of failing the lesson. Your own model can be added as another engine in `app/llm.py`.
+
 ## How a video wins
 
 Each lesson runs this pipeline:
@@ -54,7 +66,9 @@ The first account you create becomes the owner, on the Pro plan. Later sign-ups 
 
 | Key | Default | |
 |---|---|---|
-| `BESTTAKE_MODEL` | `claude-sonnet-5` | Planner, jury, and lesson writer |
+| `AI_PROVIDER` | `none` | The default engine: `none`, `ollama`, or `anthropic` |
+| `OLLAMA_MODEL` / `OLLAMA_VISION_MODEL` | `qwen2.5:14b` / `qwen2.5vl:7b` | Local models |
+| `BESTTAKE_MODEL` | `claude-sonnet-5` | Claude model |
 | `PORT` / `HOST` | `47823` / `127.0.0.1` | Point a Cloudflare Tunnel ingress at `http://localhost:47823` |
 | `COOKIE_SECURE` | `0` | Set to `1` when served over HTTPS (for example, behind the tunnel) |
 | `ALLOW_SIGNUP` | `1` | Set to `0` to close sign-ups |

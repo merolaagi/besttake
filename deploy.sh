@@ -11,6 +11,28 @@ HOST="$(envval HOST)"; HOST="${HOST:-127.0.0.1}"
 URL="http://localhost:${PORT}"
 mkdir -p data
 
+if [ "$(envval AI_PROVIDER)" = "ollama" ]; then
+  OM="$(envval OLLAMA_MODEL)"; OM="${OM:-qwen2.5:14b}"
+  OV="$(envval OLLAMA_VISION_MODEL)"; OV="${OV:-qwen2.5vl:7b}"
+  if ! command -v ollama >/dev/null 2>&1; then
+    echo "Installing Ollama..."
+    brew install ollama || echo "Could not install Ollama. Install it from https://ollama.com and run this again."
+  fi
+  if command -v ollama >/dev/null 2>&1; then
+    if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+      echo "Starting Ollama..."
+      brew services start ollama >/dev/null 2>&1 || (nohup ollama serve > data/ollama.log 2>&1 &)
+      for i in $(seq 1 30); do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done
+    fi
+    for m in "$OM" "$OV"; do
+      if ! ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$m"; then
+        echo "Downloading $m (one time, several GB)..."
+        ollama pull "$m" || echo "Could not download $m."
+      fi
+    done
+  fi
+fi
+
 if [ -f data/server.pid ] && kill -0 "$(cat data/server.pid)" 2>/dev/null; then
   kill "$(cat data/server.pid)" 2>/dev/null
 fi
@@ -51,7 +73,6 @@ command -v open >/dev/null 2>&1 && open "$URL"
 echo "Pushing to GitHub..."
 if bash publish.sh; then :; else echo "GitHub push skipped. The app is still running at $URL"; fi
 
-if ! grep -qE '^ANTHROPIC_API_KEY=.+' .env; then
-  echo
-  echo "To build courses, add ANTHROPIC_API_KEY=sk-ant-... to $DIR/.env and run the same one-liner again."
-fi
+echo
+echo "Ranking engine default: $(envval AI_PROVIDER). Basic (no AI) always works."
+echo "For a local model set AI_PROVIDER=ollama in $DIR/.env and run the same one-liner again."

@@ -7,10 +7,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, pipeline, scoring
+from . import auth, llm, pipeline, scoring, templates
 from . import db as dbm
-from .config import (ALLOW_SIGNUP, ANTHROPIC_API_KEY, COOKIE_SECURE, FREE_COURSE_LIMIT, MODEL_SMART,
-                     ROOT, VERSION)
+from .config import (AI_PROVIDER, ALLOW_SIGNUP, ANTHROPIC_API_KEY, COOKIE_SECURE, FREE_COURSE_LIMIT, MODEL_SMART,
+                     OLLAMA_MODEL, ROOT, VERSION)
 from .db import db
 
 ACTIVE = ("queued", "planning", "building")
@@ -97,19 +97,43 @@ def logout(request: Request, resp: Response):
     return {"ok": True}
 
 
+def engines() -> list[dict]:
+    st = llm.ollama_status()
+    return [
+        {"id": "none", "label": "Basic, no AI", "available": True,
+         "note": "Free and instant. Scores transcript coverage, comments, visuals and audience numbers. You give the lesson list."},
+        {"id": "ollama", "label": f"Local model ({OLLAMA_MODEL})", "available": bool(st["running"] and st["text"]),
+         "note": st["note"]},
+        {"id": "anthropic", "label": f"Claude ({MODEL_SMART})", "available": bool(ANTHROPIC_API_KEY),
+         "note": "Best judging and full lesson notes." if ANTHROPIC_API_KEY
+         else "Add ANTHROPIC_API_KEY to .env and redeploy to enable."},
+    ]
+
+
+def default_engine(eng: list[dict]) -> str:
+    ok = {e["id"] for e in eng if e["available"]}
+    return AI_PROVIDER if AI_PROVIDER in ok else "none"
+
+
 @app.get("/api/me")
 def me(user=Depends(auth.current_user)):
     with db() as c:
         used = c.execute("SELECT COUNT(*) FROM courses WHERE user_id=?", (user["id"],)).fetchone()[0]
+    eng = engines()
     return {
         "user": user,
         "usage": {"courses": used, "limit": None if user["plan"] != "free" else FREE_COURSE_LIMIT},
         "version": VERSION,
-        "api_key_configured": bool(ANTHROPIC_API_KEY),
-        "model": MODEL_SMART,
+        "engines": eng,
+        "default_engine": default_engine(eng),
         "profiles": scoring.PROFILE_LABELS,
         "criteria": scoring.CRITERIA,
     }
+
+
+@app.get("/api/templates")
+def list_templates(user=Depends(auth.current_user)):
+    return {"templates": templates.TEMPLATES}
 
 
 class CourseIn(BaseModel):
@@ -118,6 +142,8 @@ class CourseIn(BaseModel):
     depth: str = "standard"
     profile: str = "balanced"
     goal: str | None = None
+    engine: str = "none"
+    lessons: str | None = None
 
 
 def _own_course(c, cid: int, uid: int):
@@ -132,8 +158,13 @@ def create_course(body: CourseIn, user=Depends(auth.current_user)):
     topic = body.topic.strip()
     if len(topic) < 3:
         raise HTTPException(400, "Describe the topic in a few words.")
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(503, "The server has no ANTHROPIC_API_KEY yet. Add it to .env and restart.")
+    eng = {e["id"]: e for e in engines()}
+    engine = body.engine if body.engine in eng else "none"
+    if not eng[engine]["available"]:
+        raise HTTPException(400, f"{eng[engine]['label']} isn't available: {eng[engine]['note']}")
+    plan = templates.parse_lessons(body.lessons or "", topic)
+    if engine == "none" and not plan:
+        raise HTTPException(400, "Basic mode needs a lesson list. Add one lesson per line, or pick a template.")
     level = body.level if body.level in pipeline.LEVELS else "beginner"
     depth = body.depth if body.depth in pipeline.DEPTHS else "standard"
     profile = body.profile if body.profile in scoring.PROFILES else "balanced"
@@ -148,12 +179,15 @@ def create_course(body: CourseIn, user=Depends(auth.current_user)):
                 raise HTTPException(409, "Your other course is still building. Start this one when it finishes.")
         now = time.time()
         cur = c.execute(
-            "INSERT INTO courses(user_id,topic,level,goal,depth,profile,title,status,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (user["id"], topic[:200], level, (body.goal or "").strip()[:500], depth, profile, topic[:200],
+            "INSERT INTO courses(user_id,topic,level,goal,depth,profile,provider,title,status,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (user["id"], topic[:200], level, (body.goal or "").strip()[:500], depth, profile, engine, topic[:200],
              "queued", now, now))
         cid = cur.lastrowid
-    dbm.log(cid, "Queued")
+    if plan:
+        n = pipeline.insert_plan(cid, plan)
+        dbm.log(cid, f"Using your list of {n} lessons")
+    dbm.log(cid, f"Queued, ranking with {pipeline.ENGINE_NAMES[engine]}")
     pipeline.enqueue(cid)
     return {"id": cid}
 
@@ -162,7 +196,7 @@ def create_course(body: CourseIn, user=Depends(auth.current_user)):
 def list_courses(user=Depends(auth.current_user)):
     with db() as c:
         rows = c.execute("""
-          SELECT c.id, c.topic, c.title, c.status, c.depth, c.profile, c.created_at,
+          SELECT c.id, c.topic, c.title, c.status, c.depth, c.profile, c.provider, c.created_at,
             (SELECT COUNT(*) FROM lessons l WHERE l.course_id=c.id) AS total,
             (SELECT COUNT(*) FROM lessons l WHERE l.course_id=c.id AND l.status='ready') AS ready,
             (SELECT COUNT(*) FROM progress p JOIN lessons l ON l.id=p.lesson_id
@@ -250,7 +284,8 @@ def get_lesson(lid: int, user=Depends(auth.current_user)):
     return {
         "lesson": lesson,
         "course": {"id": course["id"], "title": course["title"], "topic": course["topic"],
-                   "status": course["status"], "profile": course["profile"]},
+                   "status": course["status"], "profile": course["profile"],
+                   "provider": course.get("provider") or "none"},
         "outline": outline,
         "candidates": cands,
         "weights": scoring.PROFILES.get(course["profile"] or "balanced"),

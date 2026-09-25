@@ -17,6 +17,7 @@ const CRIT = [
   { k: "freshness", label: "Freshness", color: "var(--c-aud3)" },
 ];
 
+const ENGINE_TEXT = { none: "Basic, no AI", ollama: "Local model", anthropic: "Claude" };
 const STATUS_TEXT = {
   queued: "Waiting to start", planning: "Planning lessons", building: "Finding the best videos",
   ready: "Ready", partial: "Ready, some lessons need a retry", failed: "Stopped", interrupted: "Paused",
@@ -164,31 +165,69 @@ function viewSignin(mode = "signin") {
 /* ---------- Dashboard ---------- */
 
 async function viewHome() {
-  const [{ courses }] = await Promise.all([api("/api/courses"), loadMe()]);
+  const [{ courses }, { templates }] = await Promise.all([api("/api/courses"), api("/api/templates"), loadMe()]);
   const me = state.me;
   const profiles = Object.entries(me.profiles || { balanced: "Balanced" });
+  const engines = me.engines || [];
   app.innerHTML = `
-  ${me.api_key_configured ? "" : `<div class="notice">The server has no Anthropic API key yet. Add <code>ANTHROPIC_API_KEY</code> to <code>.env</code> and restart BestTake to build courses.</div>`}
   <form class="builder" id="builder">
     <h1>What do you want to learn?</h1>
     <div class="field"><label for="topic" class="muted">Topic</label>
       <input id="topic" class="topic" placeholder="System design: low-level and high-level design" required maxlength="200"></div>
     <div class="row3">
+      <div class="field"><label for="engine">Ranking engine</label>
+        <select id="engine">${engines.map((e) => `<option value="${esc(e.id)}" ${e.available ? "" : "disabled"} ${e.id === me.default_engine ? "selected" : ""}>${esc(e.label)}${e.available ? "" : " (not set up)"}</option>`).join("")}</select>
+        <p class="hint" id="enginenote"></p></div>
       <div class="field"><label for="level">Starting point</label>
         <select id="level"><option value="beginner">New to this</option><option value="intermediate">Some background</option><option value="advanced">Experienced</option></select></div>
-      <div class="field"><label for="depth">Length</label>
-        <select id="depth"><option value="quick">Quick, 6 lessons</option><option value="standard" selected>Standard, 12 lessons</option><option value="deep">Deep, 20 lessons</option></select></div>
       <div class="field"><label for="profile">What makes a video best</label>
         <select id="profile">${profiles.map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("")}</select></div>
     </div>
-    <div class="field"><label for="goal">Goal <span class="muted">(optional)</span></label>
-      <input id="goal" placeholder="Pass system design interviews at senior level" maxlength="500"></div>
+    <div class="field">
+      <div class="labelrow"><label for="lessons">Lessons <span class="muted" id="lessonsreq"></span></label>
+        <select id="template" aria-label="Start from a template"><option value="">Start from a template</option>${templates.map((t) => `<option value="${esc(t.id)}">${esc(t.label)}</option>`).join("")}</select></div>
+      <textarea id="lessons" rows="7" spellcheck="false" placeholder="# Core building blocks&#10;Load balancing: round robin, health checks, layer 7&#10;Caching: eviction, LRU, CDN&#10;Consistent hashing"></textarea>
+      <p class="hint">One lesson per line. Start a line with # to begin a module. Add concepts after a colon so coverage can be checked.</p>
+    </div>
+    <div class="row3 ai-only">
+      <div class="field"><label for="depth">Length when the AI plans</label>
+        <select id="depth"><option value="quick">Quick, 6 lessons</option><option value="standard" selected>Standard, 12 lessons</option><option value="deep">Deep, 20 lessons</option></select></div>
+      <div class="field" style="grid-column: span 2"><label for="goal">Goal <span class="muted">(optional)</span></label>
+        <input id="goal" placeholder="Pass system design interviews at senior level" maxlength="500"></div>
+    </div>
     <p class="error" id="builderr"></p>
     <div class="actions"><button type="submit" id="buildbtn">Build course</button>
-      <span class="muted small">Building takes a few minutes. You can start lessons as soon as they're ready.</span></div>
+      <span class="muted small" id="buildhint"></span></div>
   </form>
   <h2>Your courses</h2>
   ${courses.length ? `<ul class="courses">${courses.map(courseRow).join("")}</ul>` : `<p class="empty">No courses yet. Enter a topic above to build your first one.</p>`}`;
+
+  const engineSel = document.getElementById("engine");
+  const syncEngine = () => {
+    const e = engines.find((x) => x.id === engineSel.value) || engines[0];
+    const basic = e.id === "none";
+    document.getElementById("enginenote").textContent = e.note || "";
+    document.getElementById("lessonsreq").textContent = basic ? "(required in Basic mode)" : "(optional, leave empty and the AI plans them)";
+    document.querySelectorAll(".ai-only").forEach((el) => { el.hidden = basic; });
+    document.getElementById("buildhint").textContent = basic
+      ? "Basic mode takes about a minute per lesson, mostly reading YouTube."
+      : e.id === "ollama" ? "A local model takes a few minutes per lesson. Lessons appear as they finish."
+      : "Building takes a few minutes. You can start lessons as soon as they're ready.";
+  };
+  engineSel.onchange = syncEngine;
+  syncEngine();
+
+  document.getElementById("template").onchange = (e) => {
+    const t = templates.find((x) => x.id === e.target.value);
+    if (!t) return;
+    const ta = document.getElementById("lessons");
+    if (ta.value.trim() && !confirm("Replace your lesson list with this template?")) { e.target.value = ""; return; }
+    ta.value = t.text;
+    const topic = document.getElementById("topic");
+    if (!topic.value.trim()) topic.value = t.topic;
+    e.target.value = "";
+  };
+
   document.getElementById("builder").onsubmit = async (e) => {
     e.preventDefault();
     const btn = document.getElementById("buildbtn"), err = document.getElementById("builderr");
@@ -197,7 +236,8 @@ async function viewHome() {
       const r = await api("/api/courses", { method: "POST", body: {
         topic: document.getElementById("topic").value, level: document.getElementById("level").value,
         depth: document.getElementById("depth").value, profile: document.getElementById("profile").value,
-        goal: document.getElementById("goal").value,
+        goal: document.getElementById("goal").value, engine: engineSel.value,
+        lessons: document.getElementById("lessons").value,
       } });
       location.hash = `#/course/${r.id}`;
     } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
@@ -210,7 +250,7 @@ function courseRow(c) {
   const live = ACTIVE.includes(c.status);
   const progress = c.total ? `${c.done} of ${c.total} lessons done` : "Planning";
   return `<li><a class="course" href="#/course/${c.id}">
-    <span><span class="ct">${esc(c.title || c.topic)}</span><br><span class="status ${live ? "live" : ""}">${esc(STATUS_TEXT[c.status] || c.status)}</span></span>
+    <span><span class="ct">${esc(c.title || c.topic)}</span><br><span class="status ${live ? "live" : ""}">${esc(STATUS_TEXT[c.status] || c.status)}, ${esc(ENGINE_TEXT[c.provider] || "")}</span></span>
     <span><span class="meter" title="${pctReady}% of lessons built"><i style="width:${pctReady}%"></i></span></span>
     <span class="small muted">${esc(progress)}</span></a></li>`;
 }
@@ -263,7 +303,7 @@ async function viewCourse(id) {
     <div>
       <h1>${esc(course.title || course.topic)}</h1>
       ${course.summary ? `<p class="hook">${esc(course.summary)}</p>` : ""}
-      <p class="status ${live ? "live" : ""}">${esc(STATUS_TEXT[course.status] || course.status)}${lessons.length ? `, ${lessons.filter((l) => l.status === "ready").length} of ${lessons.length} lessons built` : ""}</p>
+      <p class="status ${live ? "live" : ""}">Ranked with ${esc(ENGINE_TEXT[course.provider] || "")}. ${esc(STATUS_TEXT[course.status] || course.status)}${lessons.length ? `, ${lessons.filter((l) => l.status === "ready").length} of ${lessons.length} lessons built` : ""}</p>
       ${course.error ? `<div class="notice">${esc(course.error)}</div>` : ""}
       <div class="actions" style="display:flex;gap:.8rem;flex-wrap:wrap;margin:1.2rem 0">
         ${firstReady ? `<a class="btn" href="#/lesson/${firstReady.id}">${firstReady.completed ? "Review" : "Start"} “${esc(firstReady.title)}”</a>` : ""}
@@ -319,18 +359,25 @@ async function viewLesson(id) {
     </div>
     <div class="prose">
       ${c.hook ? `<p class="hook">${esc(c.hook)}</p>` : ""}
-      <section class="block"><h2>Key ideas</h2><div class="ideas">
+      ${(c.concept_marks || []).length ? `<section class="block"><h2>Concepts in this lesson</h2><ul class="marks">
+        ${c.concept_marks.map((m) => `<li>${m.start != null ? `<button class="link jump" data-t="${m.start}">${fmt(m.start)}</button>` : `<span class="muted small">${m.covered ? "mentioned" : "not found"}</span>`}<span>${esc(m.concept)}</span></li>`).join("")}
+      </ul></section>` : ""}
+      ${(c.key_ideas || []).length ? `<section class="block"><h2>Key ideas</h2><div class="ideas">
         ${c.key_ideas.map((k) => `<div class="idea"><h3>${esc(k.title)}</h3>${md(k.body)}</div>`).join("")}
-      </div></section>
+      </div></section>` : ""}
       ${c.diagram ? `<section class="block"><h2>The picture</h2><div class="diagram" id="diagram"></div></section>` : ""}
       ${c.worked_example ? `<section class="block"><h2>Worked example</h2>${md(c.worked_example)}</section>` : ""}
-      ${c.pitfalls.length ? `<section class="block"><h2>Common mistakes</h2><ul>${c.pitfalls.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></section>` : ""}
-      ${c.quiz.length ? `<section class="block quiz" id="quiz"><h2>Check your understanding</h2>${c.quiz.map(quizQ).join("")}<p id="quizscore" class="muted"></p></section>` : ""}
+      ${(c.pitfalls || []).length ? `<section class="block"><h2>Common mistakes</h2><ul>${c.pitfalls.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></section>` : ""}
+      ${(c.quiz || []).length ? `<section class="block quiz" id="quiz"><h2>Check your understanding</h2>${c.quiz.map(quizQ).join("")}<p id="quizscore" class="muted"></p></section>` : ""}
       ${c.check_yourself ? `<section class="block"><h2>Explain it out loud</h2><p class="checkq">${esc(c.check_yourself)}</p></section>` : ""}
+      ${(c.chapters || []).length > 1 ? `<section class="block"><h2>Chapters</h2><ul class="marks">
+        ${c.chapters.map((ch) => `<li><button class="link jump" data-t="${ch.start}">${fmt(ch.start)}</button><span>${esc(ch.title)}</span></li>`).join("")}
+      </ul></section>` : ""}
+      ${c.mode === "basic" ? `<p class="notice small">These notes were built without AI. Switch the course to a local model or Claude to get written key ideas, a diagram and a quiz.</p>` : ""}
     </div>
     <section class="block jury">
       <h2>Why this video</h2>
-      <p class="muted">${candidates.length} videos made the shortlist. Each was scored out of 100 using the “${esc((state.me?.profiles || {})[course.profile] || course.profile)}” weighting.</p>
+      <p class="muted">${candidates.length} videos made the shortlist. Each was scored out of 100 using the “${esc((state.me?.profiles || {})[course.profile] || course.profile)}” weighting${course.provider === "none" ? ". Scored without AI: coverage comes from matching the lesson's concepts in the transcript, visuals from analyzing sampled frames, and viewer sentiment from comment phrases. Correctness can't be checked in this mode" : ""}.</p>
       ${candidates.map(candRow).join("")}
       ${legend()}
     </section>
@@ -350,8 +397,16 @@ async function viewLesson(id) {
     };
   });
 
+  document.querySelectorAll(".jump").forEach((b) => {
+    b.onclick = () => {
+      const t = +b.dataset.t;
+      document.getElementById("player").src = embedUrl(v.id, { start: t, end: 0 }, true);
+      document.querySelectorAll(".segments button").forEach((x) => x.setAttribute("aria-pressed", "false"));
+      document.querySelector(".player").scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+  });
   if (c.diagram) renderDiagram(c.diagram);
-  wireQuiz(c.quiz, id);
+  wireQuiz(c.quiz || [], id);
 
   document.getElementById("done").onclick = async (e) => {
     const nowDone = !progress.completed;

@@ -37,12 +37,16 @@ if [ ! -f .env ]; then
   fi
 fi
 
+[ -n "$(tail -c1 .env)" ] && echo >> .env
+while IFS= read -r line; do
+  key="${line%%=*}"
+  [ -z "$key" ] && continue
+  grep -qE "^${key}=" .env || echo "$line" >> .env
+done < .env.example
+
 if grep -qE '^PORT=8420$' .env; then
   sed -i '' 's/^PORT=8420$/PORT=47823/' .env 2>/dev/null || sed -i 's/^PORT=8420$/PORT=47823/' .env
   echo "Moved BestTake to port 47823."
 fi
 
-if ! grep -qE '^ANTHROPIC_API_KEY=.+' .env; then
-  echo "Note: no ANTHROPIC_API_KEY in $(pwd)/.env yet. The app will run, but building courses needs the key."
-fi
 echo "Setup complete."
