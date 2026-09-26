@@ -5,7 +5,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import heuristics, llm, media, scoring, templates
+from . import heuristics, llm, media, protocol, scoring, templates, tutor
 from . import youtube as yt
 from .config import COURSE_WORKERS, DEEP_CANDIDATES, SEARCH_RESULTS
 from .db import db, log
@@ -77,12 +77,15 @@ def insert_plan(course_id: int, modules: list, limit: int = 30) -> int:
             if not queries:
                 queries = [f"{l['title']} explained"]
             concepts = [str(x) for x in (l.get("concepts") or []) if str(x).strip()] or [l["title"]]
+            meta = {k: str(l.get(k) or "")[:300] for k in ("stage", "pressure", "problem", "property", "mechanism")}
+            if meta["stage"] not in tutor.STAGES:
+                meta["stage"] = "derive" if meta["mechanism"] else "orient"
             rows.append((course_id, mi, m.get("title") or f"Part {mi + 1}", li, l["title"][:160],
-                         json.dumps(concepts[:8]), json.dumps(queries)))
+                         json.dumps(concepts[:8]), json.dumps(queries), json.dumps(meta)))
     with db() as c:
         c.executemany(
-            "INSERT INTO lessons(course_id,module_idx,module_title,idx,title,concepts,queries,status) "
-            "VALUES(?,?,?,?,?,?,?,'pending')", rows)
+            "INSERT INTO lessons(course_id,module_idx,module_title,idx,title,concepts,queries,meta,status) "
+            "VALUES(?,?,?,?,?,?,?,?,'pending')", rows)
     return len(rows)
 
 
@@ -91,7 +94,14 @@ def run_course(cid: int):
         course = dict(c.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone())
         has_lessons = c.execute("SELECT COUNT(*) FROM lessons WHERE course_id=?", (cid,)).fetchone()[0]
     provider = course.get("provider") or "none"
-    if not has_lessons:
+    tutor_mode = course.get("mode") == "tutor"
+    if not has_lessons and tutor_mode:
+        _set_course(cid, status="planning")
+        log(cid, f"Designing a first-principles course with {ENGINE_NAMES[provider]}")
+        plan_tutor(course)
+        with db() as c:
+            course = dict(c.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone())
+    elif not has_lessons:
         if provider == "none":
             t = templates.match_template(course["topic"])
             if not t:
@@ -111,7 +121,7 @@ def run_course(cid: int):
             "SELECT * FROM lessons WHERE course_id=? AND status!='ready' ORDER BY module_idx, idx", (cid,))]
     for lesson in lessons:
         try:
-            build_lesson(course, lesson)
+            (build_tutor_lesson if tutor_mode else build_lesson)(course, lesson)
         except Exception as e:
             traceback.print_exc()
             _set_lesson(lesson["id"], status="failed", error=str(e)[:500])
@@ -162,9 +172,9 @@ Use exactly {n} lessons in total."""
     log(course["id"], f"Planned {count} lessons")
 
 
-def build_lesson(course: dict, lesson: dict):
+def rank_sources(course: dict, lesson: dict, judge_provider: str) -> list:
     cid, lid = course["id"], lesson["id"]
-    provider = course.get("provider") or "none"
+    provider = judge_provider
     concepts = json.loads(lesson["concepts"] or "[]")
     queries = json.loads(lesson["queries"] or "[]")
     ctx = heuristics.topic_context(course["topic"])
@@ -247,8 +257,17 @@ def build_lesson(course: dict, lesson: dict):
                  m.get("duration"), json.dumps(_public_meta(m)), json.dumps(res["raw"]),
                  json.dumps(judge_public), res["score"], json.dumps(res["contrib"]), rank))
 
+    log(cid, f"Best source for “{title}”: “{results[0]['meta'].get('title', '')[:70]}” ({results[0]['score']})")
+    return results
+
+
+def build_lesson(course: dict, lesson: dict):
+    cid, lid = course["id"], lesson["id"]
+    provider = course.get("provider") or "none"
+    concepts = json.loads(lesson["concepts"] or "[]")
+    title = lesson["title"]
+    results = rank_sources(course, lesson, provider)
     winner = results[0]
-    log(cid, f"Picked “{winner['meta'].get('title', '')[:70]}” ({winner['score']}) for “{title}”")
 
     _set_lesson(lid, status="extracting", winner_video=winner["meta"]["id"])
     steps, source, extract_error = [], winner, ""
@@ -473,3 +492,94 @@ def _thumbs(paths: list) -> list[str]:
         except Exception:
             continue
     return out
+
+
+# ---------------- Tutor mode ----------------
+
+def plan_tutor(course: dict):
+    provider = course.get("provider") or "anthropic"
+    n = DEPTHS.get(course.get("depth") or "standard", 12)
+    plan0 = json.loads(course.get("plan") or "{}")
+    proto = protocol.active(course["user_id"])
+    data = tutor.plan(course, proto["text"], provider, n, plan0.get("user_lessons"))
+    ctx = heuristics.topic_context(course["topic"])
+    ctx_kw = set(heuristics.keywords(ctx))
+    for m in data.get("modules") or []:
+        for l in m.get("lessons") or []:
+            qs = [q for q in (l.get("queries") or []) if isinstance(q, str) and q.strip()]
+            l["queries"] = [q if ctx_kw <= set(heuristics.keywords(q)) else f"{q} {ctx}" for q in qs] or \
+                templates.lesson_queries(l.get("title") or "", ctx)
+    count = insert_plan(course["id"], data.get("modules") or [], limit=max(n, 1) + 2)
+    if not count:
+        raise RuntimeError("The planner returned no lessons. Try rephrasing the topic.")
+    keep = {k: data.get(k) for k in ("meaning", "purpose", "primitives", "questions", "running_example")}
+    _set_course(course["id"], title=data.get("title") or course["topic"], summary=data.get("summary") or "",
+                plan=json.dumps(keep), protocol_version=proto["version"])
+    log(course["id"], f"Planned {count} lessons with Tutor Protocol v{proto['version']}")
+
+
+def build_tutor_lesson(course: dict, lesson: dict):
+    cid, lid = course["id"], lesson["id"]
+    provider = course.get("provider") or "anthropic"
+    concepts = json.loads(lesson["concepts"] or "[]")
+    meta = json.loads(lesson.get("meta") or "{}")
+    meta["concepts"] = concepts
+    title = lesson["title"]
+
+    try:
+        results = rank_sources(course, lesson, "anthropic" if provider == "anthropic" else "none")
+    except Exception as e:
+        if _fatal(e):
+            raise
+        log(cid, f"No usable videos for “{title}” ({str(e)[:80]}); teaching it from first principles")
+        results = []
+    srcs = [r["meta"] for r in results if r["rel"] >= 0.3][:2] or [r["meta"] for r in results[:1]]
+
+    frame_notes, images = [], []
+    _set_lesson(lid, status="extracting")
+    try:
+        if not srcs:
+            raise RuntimeError("no source video")
+        steps = media.extract(srcs[0], concepts, title, log=lambda msg: log(cid, msg))
+        if len(steps) > 8:
+            steps = [steps[round(i * (len(steps) - 1) / 7)] for i in range(8)]
+        paths = [(s["t"], media.MEDIA_DIR / srcs[0]["id"] / Path(s["image"]).name) for s in steps]
+        if provider == "anthropic":
+            images = _thumbs([p for _, p in paths])
+        elif provider == "ollama" and llm.ollama_status().get("vision"):
+            log(cid, f"Reading {len(paths)} key frames with the vision model")
+            frame_notes = tutor.caption_frames([(t, str(p)) for t, p in paths])
+    except Exception as e:
+        if _fatal(e):
+            raise
+        log(cid, f"Continuing without reference frames for “{title}”: {str(e)[:120]}")
+
+    _set_lesson(lid, status="designing")
+    log(cid, f"Designing “{title}” with {ENGINE_NAMES[provider]}")
+    plan_data = json.loads(course.get("plan") or "{}")
+    with db() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT id, title, meta, content, status FROM lessons WHERE course_id=? ORDER BY module_idx, idx", (cid,))]
+    prior, rules = [], []
+    for r in rows:
+        if r["id"] == lid:
+            break
+        m = json.loads(r["meta"] or "{}")
+        prior.append({"title": r["title"], "mechanism": m.get("mechanism")})
+        if r["status"] == "ready" and r["content"]:
+            rules += json.loads(r["content"]).get("rules") or []
+    plan_data["rules_so_far"] = rules
+    proto = protocol.active(course["user_id"])
+
+    content = None
+    for attempt in range(2):
+        data = tutor.design(course, plan_data, lesson, meta, prior, srcs, frame_notes, images, proto["text"], provider)
+        content = tutor.clean_lesson(data, srcs)
+        if len(content["beats"]) >= 4:
+            break
+        log(cid, f"The design for “{title}” was too thin; asking again")
+    if not content or len(content["beats"]) < 3:
+        raise RuntimeError("The model did not produce a usable lesson. Try again, or switch engines.")
+    content["chain"] = {k: meta.get(k) or "" for k in ("stage", "pressure", "problem", "property", "mechanism")}
+    _set_lesson(lid, status="ready", content=json.dumps(content))
+    log(cid, f"“{title}” is ready: {len(content['beats'])} beats, {sum(1 for b in content['beats'] if b.get('question'))} questions")

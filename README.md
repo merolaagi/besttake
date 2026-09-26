@@ -4,7 +4,30 @@ Learn anything from the best explanation on YouTube, as a step-by-step visual bu
 
 Name a topic and BestTake builds a zero-to-hero course. For every lesson it searches YouTube, shortlists candidates, has a Claude "jury" score each one, and teaches the lesson with the winning video. It embeds the exact segments to watch, then adds key ideas, a diagram, a worked example, common mistakes, a quiz, and an "explain it out loud" check.
 
-## What a lesson is
+## Two modes
+
+**Tutor mode** (Local model or Claude) is a first-principles tutor. It doesn't show you someone else's video. It uses the best YouTube explanations as source material, reading their transcripts and key frames, and then designs its own lessons and draws its own animated visuals. Each course follows your **tutor protocol**:
+
+- **Orient:** break the topic's words down, and say why the field exists
+- **Reduce:** find the primitives underneath
+- **Derive:** every concept emerges from requirement → problem → property → mechanism, on one running example that keeps growing
+- **Connect:** link each new idea to what you already know
+- **Prove:** apply the rules to an unfamiliar situation
+- **Compress:** every lesson ends in a few generative rules, collected into your course rulebook
+
+Lessons are sequences of beats. "Your turn" beats ask you to derive the next idea before it's shown. An answer checker judges your reasoning. When you're stuck, it names the missing primitive instead of re-explaining, and it can build a lesson that rebuilds that primitive.
+
+The visuals are drawn by BestTake from a small scene language the model writes:
+
+- architecture and concept diagrams that build up beat by beat, with traffic flowing along arrows, failing components, and multiplying copies
+- charts that draw themselves
+- tables and code that highlight the part being discussed
+
+The protocol itself is editable and versioned on the Tutor protocol page. Notes you leave at the end of each lesson ("where did the method break?") feed the next version.
+
+**Video build-up** (Basic, no AI) extracts the diagrams and animations from the best video, as described below.
+
+## What a video build-up lesson is
 
 BestTake downloads the winning video (video only, up to 720p) and samples one frame per second in the parts that teach the lesson. It then:
 

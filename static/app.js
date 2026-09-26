@@ -23,7 +23,7 @@ const STATUS_TEXT = {
   ready: "Ready", partial: "Ready, some lessons need a retry", failed: "Stopped", interrupted: "Paused",
 };
 const LESSON_TEXT = {
-  pending: "Waiting", searching: "Searching", judging: "Judging", extracting: "Extracting visuals", writing: "Writing notes", ready: "Ready", failed: "Failed",
+  pending: "Waiting", searching: "Searching", judging: "Judging", extracting: "Reading the source videos", designing: "Designing the lesson", writing: "Writing notes", ready: "Ready", failed: "Failed",
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -33,6 +33,11 @@ const fmt = (sec) => {
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 };
 const num = (n) => (n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n));
+
+const helpers = () => ({
+  esc, md, fmt, api, toast,
+  setKeys: (fn) => { if (state.keys) window.removeEventListener("keydown", state.keys); state.keys = fn; window.addEventListener("keydown", fn); },
+});
 
 function toast(msg) {
   const t = document.getElementById("toast");
@@ -107,7 +112,7 @@ function renderNav() {
   if (!state.me) { nav.innerHTML = ""; return; }
   const u = state.me.user, usage = state.me.usage;
   const plan = u.plan === "free" ? `Free plan, ${usage.courses} of ${usage.limit} courses` : "Pro";
-  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a>${u.is_owner ? `<a href="#/settings">Settings</a>` : ""}<button class="link" id="signout">Sign out</button>`;
+  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a><a href="#/protocol">Tutor protocol</a>${u.is_owner ? `<a href="#/settings">Settings</a>` : ""}<button class="link" id="signout">Sign out</button>`;
   document.getElementById("signout").onclick = async () => {
     await api("/api/logout", { method: "POST" }).catch(() => {});
     state.me = null; renderNav(); location.hash = "#/signin";
@@ -206,8 +211,10 @@ async function viewHome() {
   const syncEngine = () => {
     const e = engines.find((x) => x.id === engineSel.value) || engines[0];
     const basic = e.id === "none";
-    document.getElementById("enginenote").textContent = e.note || "";
-    document.getElementById("lessonsreq").textContent = basic ? "(required in Basic mode)" : "(optional, leave empty and the AI plans them)";
+    document.getElementById("enginenote").textContent = (basic
+      ? "Video build-up: pulls the diagrams and animations out of the best video. "
+      : "Tutor mode: designs its own first-principles lessons and visuals, using the best videos as source material. ") + (e.note || "");
+    document.getElementById("lessonsreq").textContent = basic ? "(required in Basic mode, or pick a template)" : "(optional; leave empty and the tutor plans from first principles)";
     document.querySelectorAll(".ai-only").forEach((el) => { el.hidden = basic; });
     document.getElementById("buildhint").textContent = basic
       ? "Basic mode takes about a minute per lesson, mostly reading YouTube."
@@ -293,7 +300,8 @@ function wireOutline() {
 /* ---------- Course ---------- */
 
 async function viewCourse(id) {
-  const { course, lessons, events } = await api(`/api/courses/${id}`);
+  const { course, lessons, events, rulebook, gaps } = await api(`/api/courses/${id}`);
+  const pl = course.plan || {};
   const live = ACTIVE.includes(course.status) || course.running;
   const firstReady = lessons.find((l) => l.status === "ready" && !l.completed) || lessons.find((l) => l.status === "ready");
   const failed = lessons.filter((l) => l.status === "failed").length;
@@ -303,18 +311,35 @@ async function viewCourse(id) {
     <div>
       <h1>${esc(course.title || course.topic)}</h1>
       ${course.summary ? `<p class="hook">${esc(course.summary)}</p>` : ""}
-      <p class="status ${live ? "live" : ""}">Ranked with ${esc(ENGINE_TEXT[course.provider] || "")}. ${esc(STATUS_TEXT[course.status] || course.status)}${lessons.length ? `, ${lessons.filter((l) => l.status === "ready").length} of ${lessons.length} lessons built` : ""}</p>
+      <p class="status ${live ? "live" : ""}">${course.mode === "tutor" ? "Tutor mode" : "Video build-up"} with ${esc(ENGINE_TEXT[course.provider] || "")}. ${esc(STATUS_TEXT[course.status] || course.status)}${lessons.length ? `, ${lessons.filter((l) => l.status === "ready").length} of ${lessons.length} lessons built` : ""}</p>
       ${course.error ? `<div class="notice">${esc(course.error)}</div>` : ""}
       <div class="actions" style="display:flex;gap:.8rem;flex-wrap:wrap;margin:1.2rem 0">
         ${firstReady ? `<a class="btn" href="#/lesson/${firstReady.id}">${firstReady.completed ? "Review" : "Start"} “${esc(firstReady.title)}”</a>` : ""}
         ${canResume ? `<button class="ghost" id="resume">${failed ? `Retry ${failed} failed lesson${failed > 1 ? "s" : ""}` : "Resume building"}</button>` : ""}
         ${!live ? `<button class="ghost" id="del">Delete course</button>` : ""}
       </div>
+      ${course.mode === "tutor" && (pl.meaning || pl.primitives) ? `
+      <section class="orient">
+        ${pl.meaning ? `<div><h3>What the words mean</h3><p>${esc(pl.meaning)}</p></div>` : ""}
+        ${pl.purpose ? `<div><h3>Why it exists</h3><p>${esc(pl.purpose)}</p></div>` : ""}
+        ${(pl.primitives || []).length ? `<div><h3>Primitives</h3><ul class="prims">${pl.primitives.map((p) => `<li><b>${esc(p.name)}</b><span>${esc(p.idea)}</span></li>`).join("")}</ul></div>` : ""}
+        ${(pl.questions || []).length ? `<div><h3>The questions we always ask</h3><ol class="qs">${pl.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol></div>` : ""}
+        ${pl.running_example ? `<div class="example"><h3>Running example: ${esc(pl.running_example.name)}</h3><p>${esc(pl.running_example.description)}</p></div>` : ""}
+      </section>
+      ${rulebook.length ? `<section class="block"><h3>Your rulebook</h3><p class="muted small">Every lesson compresses into a few generative rules.</p><ol class="rulebook">${rulebook.map((r) => `<li>${esc(r.rule)} <a class="small muted" href="#/lesson/${r.lesson_id}">${esc(r.lesson)}</a></li>`).join("")}</ol></section>` : ""}
+      ${gaps.length ? `<section class="block"><h3>Missing pieces</h3><p class="muted small">Ideas you got stuck on. The tutor can build a lesson that rebuilds each one from what you already know.</p>
+        <ul class="gaps">${gaps.map((g) => `<li><span>${esc(g.missing)}</span><button class="ghost small" data-gap="${esc(g.missing)}" data-after="${g.lesson_id}">Build a lesson</button></li>`).join("")}</ul></section>` : ""}` : ""}
       <h3>Build log</h3>
       <div class="log" id="log">${events.map((e) => `<div>${esc(new Date(e.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}  ${esc(e.msg)}</div>`).join("") || "<div>Nothing yet.</div>"}</div>
     </div></div>`;
   wireOutline();
   const log = document.getElementById("log"); log.scrollTop = log.scrollHeight;
+  document.querySelectorAll("[data-gap]").forEach((b) => {
+    b.onclick = async () => {
+      try { await api(`/api/courses/${id}/gap`, { method: "POST", body: { primitive: b.dataset.gap, after_lesson_id: +b.dataset.after } }); toast("Building that lesson"); route(); }
+      catch (ex) { toast(ex.message); }
+    };
+  });
   const r = document.getElementById("resume");
   if (r) r.onclick = async () => { try { await api(`/api/courses/${id}/resume`, { method: "POST" }); route(); } catch (ex) { toast(ex.message); } };
   const d = document.getElementById("del");
@@ -347,6 +372,28 @@ async function viewLesson(id) {
     return;
   }
 
+  if (c.type === "tutor") {
+    app.innerHTML = `<div class="split">${outlineHtml(course, outline, lesson.id)}<article>
+      ${BTTutor.tutorLessonHtml(data, helpers())}
+      <details class="jury" style="margin-top:2rem"><summary><h2 style="display:inline">Sources considered</h2></summary>
+        <p class="muted">${candidates.length} videos were ranked for this lesson. The top ones were used as source material.</p>
+        ${candidates.map(candRow).join("")}${legend()}</details>
+      <div class="lesson-nav">
+        ${prev ? `<a class="btn ghost" href="#/lesson/${prev}">Previous lesson</a>` : "<span></span>"}
+        <button id="done" class="${progress.completed ? "ghost" : ""}">${progress.completed ? "Marked as done" : "Mark as done"}</button>
+        ${next ? `<a class="btn ghost" href="#/lesson/${next}">Next lesson</a>` : "<span></span>"}
+      </div></article></div>`;
+    wireOutline();
+    BTTutor.mountTutorLesson(data, helpers());
+    document.getElementById("done").onclick = async () => {
+      const nowDone = !progress.completed;
+      try {
+        await api(`/api/lessons/${id}/progress`, { method: "POST", body: { completed: nowDone } });
+        if (nowDone && next) { toast("Lesson done"); location.hash = `#/lesson/${next}`; } else route();
+      } catch (ex) { toast(ex.message); }
+    };
+    return;
+  }
   const src = c.source || {};
   const steps = c.steps || [];
   const ytAt = (t) => `${src.url || ""}${src.url && src.url.includes("?") ? "&" : "?"}t=${Math.max(0, Math.round(t || 0))}s`;
@@ -424,12 +471,11 @@ async function viewLesson(id) {
     document.getElementById("prevstep").onclick = () => show(cur - 1);
     document.getElementById("nextstep").onclick = () => show(cur + 1);
     document.querySelectorAll(".filmstrip button").forEach((b) => { b.onclick = () => show(+b.dataset.i); });
-    state.keys = (e) => {
+    helpers().setKeys((e) => {
       if (/input|textarea|select/i.test(document.activeElement?.tagName || "")) return;
       if (e.key === "ArrowRight") show(cur + 1);
       if (e.key === "ArrowLeft") show(cur - 1);
-    };
-    window.addEventListener("keydown", state.keys);
+    });
     show(0);
   }
   document.querySelectorAll(".jump").forEach((b) => {
@@ -590,11 +636,33 @@ async function viewSettings() {
   });
 }
 
+/* ---------- Tutor protocol ---------- */
+
+async function viewProtocol() {
+  const { active, history, notes } = await api("/api/protocol");
+  app.innerHTML = `<div class="settings protocol">
+    <h1>Tutor protocol <span class="muted">v${active.version}</span></h1>
+    <p class="muted">Every tutor-mode lesson is designed with this method. It's an experiment, not doctrine: when a lesson breaks, note it, then revise the protocol. New courses and rebuilt lessons use the latest version.</p>
+    <textarea id="ptext" rows="22" spellcheck="true">${esc(active.text)}</textarea>
+    <p class="error" id="perr"></p>
+    <button id="psave">Save as v${active.version + 1}</button>
+    <section class="block"><h2>Notes from your lessons</h2>
+      ${notes.length ? `<ul class="notes">${notes.map((n) => `<li><p>${esc(n.text)}</p><span class="small muted">${esc(n.lesson_title || "")}${n.course_title ? `, ${esc(n.course_title)}` : ""}</span></li>`).join("")}</ul>` : `<p class="muted">No notes yet. At the end of each lesson you can say where the method worked or broke.</p>`}
+    </section>
+    ${history.length > 1 ? `<section class="block"><h2>Versions</h2><ul class="notes">${history.map((v) => `<li>v${v.version} <span class="small muted">${new Date(v.created_at * 1000).toLocaleString()}</span></li>`).join("")}</ul></section>` : ""}
+  </div>`;
+  document.getElementById("psave").onclick = async () => {
+    try { await api("/api/protocol", { method: "POST", body: { text: document.getElementById("ptext").value } }); toast("Protocol saved"); route(); }
+    catch (ex) { document.getElementById("perr").textContent = ex.message; }
+  };
+}
+
 /* ---------- Router ---------- */
 
 async function route() {
   clearTimeout(state.poll);
   if (state.keys) { window.removeEventListener("keydown", state.keys); state.keys = null; }
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
   const h = location.hash || "#/";
   try {
     if (h.startsWith("#/signin")) return viewSignin("signin");
@@ -605,6 +673,7 @@ async function route() {
     if ((m = h.match(/^#\/course\/(\d+)/))) return await viewCourse(+m[1]);
     if ((m = h.match(/^#\/lesson\/(\d+)/))) return await viewLesson(+m[1]);
     if (h.startsWith("#/settings")) return await viewSettings();
+    if (h.startsWith("#/protocol")) return await viewProtocol();
     return await viewHome();
   } catch (ex) {
     if (state.me) app.innerHTML = `<p class="notice">${esc(ex.message)} <a href="#/">Back to your courses</a></p>`;

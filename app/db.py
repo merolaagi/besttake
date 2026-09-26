@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS video_cache(video_id TEXT PRIMARY KEY, data TEXT, fet
 CREATE TABLE IF NOT EXISTS progress(
   user_id INTEGER, lesson_id INTEGER, completed INTEGER DEFAULT 0, quiz_score REAL,
   updated_at REAL, PRIMARY KEY(user_id, lesson_id));
+CREATE TABLE IF NOT EXISTS protocols(id INTEGER PRIMARY KEY, user_id INTEGER, version INTEGER, text TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS protocol_notes(id INTEGER PRIMARY KEY, user_id INTEGER, lesson_id INTEGER, text TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, user_id INTEGER, lesson_id INTEGER, beat INTEGER, answer TEXT,
+  verdict TEXT, feedback TEXT, missing TEXT, created_at REAL);
+CREATE INDEX IF NOT EXISTS ix_answers_user ON answers(user_id, lesson_id);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT, updated_at REAL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, course_id INTEGER, ts REAL, msg TEXT);
 CREATE INDEX IF NOT EXISTS ix_lessons_course ON lessons(course_id);
@@ -57,9 +62,14 @@ def init():
     FRAMES_DIR.mkdir(parents=True, exist_ok=True)
     with db() as c:
         c.executescript(SCHEMA)
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(courses)")}
-        if "provider" not in cols:
-            c.execute("ALTER TABLE courses ADD COLUMN provider TEXT DEFAULT 'anthropic'")
+        def add_col(table, col, decl):
+            if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        add_col("courses", "provider", "TEXT DEFAULT 'anthropic'")
+        add_col("courses", "mode", "TEXT DEFAULT 'video'")
+        add_col("courses", "plan", "TEXT")
+        add_col("courses", "protocol_version", "INTEGER")
+        add_col("lessons", "meta", "TEXT")
         ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         if "is_owner" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0")
