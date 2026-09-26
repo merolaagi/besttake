@@ -93,6 +93,21 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 The first account you create becomes the owner, on the Pro plan. Later sign-ups are on the free plan (3 courses, one building at a time).
 
+## Put it online
+
+```
+bash expose.sh besttake.fueldeskpro.com
+```
+
+This does four things:
+
+- adds the hostname to the system cloudflared config (`/etc/cloudflared/config.yml`) in front of the catch-all rule, after backing the file up and validating the new one
+- restarts the cloudflared daemon
+- turns on secure cookies
+- installs BestTake as a background service that restarts on crash and at login
+
+It then prints the CNAME to add in Cloudflare. After that, `deploy.sh` restarts the service instead of starting a loose process.
+
 ## Admin
 
 ```

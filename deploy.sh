@@ -34,33 +34,45 @@ if [ "$(setting AI_PROVIDER)" = "ollama" ]; then
   fi
 fi
 
-if [ -f data/server.pid ] && kill -0 "$(cat data/server.pid)" 2>/dev/null; then
+AGENT="$HOME/Library/LaunchAgents/com.besttake.app.plist"
+if [ "$(uname)" = "Darwin" ] && [ -f "$AGENT" ]; then
+  echo "Restarting the BestTake service..."
+  launchctl kickstart -k "gui/$(id -u)/com.besttake.app" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "$AGENT"
+  SERVICE=1
+else
+  SERVICE=0
+fi
+
+if [ "$SERVICE" = "0" ] && [ -f data/server.pid ] && kill -0 "$(cat data/server.pid)" 2>/dev/null; then
   kill "$(cat data/server.pid)" 2>/dev/null
 fi
-for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do
+[ "$SERVICE" = "1" ] || for pid in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do
   cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
   if [ "$cwd" = "$DIR" ]; then kill "$pid" 2>/dev/null; fi
 done
 for i in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$SERVICE" = "1" ] && break
   lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
   sleep 0.5
 done
-if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+if [ "$SERVICE" = "0" ] && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port $PORT is used by another app:"
   lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | tail -n +2
   echo "Change PORT in $DIR/.env and run this again."
   exit 1
 fi
 
-echo "Starting BestTake $(cat VERSION) on port $PORT..."
-nohup "$DIR/.venv/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT" > data/server.log 2>&1 &
-echo $! > data/server.pid
-disown 2>/dev/null || true
+if [ "$SERVICE" = "0" ]; then
+  echo "Starting BestTake $(cat VERSION) on port $PORT..."
+  nohup "$DIR/.venv/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT" > data/server.log 2>&1 &
+  echo $! > data/server.pid
+  disown 2>/dev/null || true
+fi
 
 UP=0
 for i in $(seq 1 40); do
   if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then UP=1; break; fi
-  if ! kill -0 "$(cat data/server.pid)" 2>/dev/null; then break; fi
+  if [ "$SERVICE" = "0" ] && ! kill -0 "$(cat data/server.pid)" 2>/dev/null; then break; fi
   sleep 0.5
 done
 if [ "$UP" != "1" ]; then
