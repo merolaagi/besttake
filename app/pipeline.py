@@ -37,8 +37,17 @@ def is_running(course_id: int) -> bool:
         return course_id in _running
 
 
+def user_key(user_id: int) -> str | None:
+    with db() as c:
+        row = c.execute("SELECT anthropic_key FROM users WHERE id=?", (user_id,)).fetchone()
+    return (row["anthropic_key"] if row else None) or None
+
+
 def _run(course_id: int):
     try:
+        with db() as c:
+            row = c.execute("SELECT user_id FROM courses WHERE id=?", (course_id,)).fetchone()
+        llm.use_key(user_key(row["user_id"]) if row else None)
         run_course(course_id)
     except Exception as e:
         traceback.print_exc()

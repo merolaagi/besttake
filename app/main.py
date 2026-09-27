@@ -99,9 +99,9 @@ def logout(request: Request, resp: Response):
     return {"ok": True}
 
 
-def engines() -> list[dict]:
+def engines(user: dict | None = None) -> list[dict]:
     st = llm.ollama_status()
-    key = settings.get("ANTHROPIC_API_KEY")
+    key = (pipeline.user_key(user["id"]) if user else None) or settings.get("ANTHROPIC_API_KEY")
     return [
         {"id": "none", "label": "Basic, no AI", "available": True,
          "note": "Free. Extracts the visuals and narration; ranks by relevance, coverage, comments, visuals and audience numbers."},
@@ -109,7 +109,7 @@ def engines() -> list[dict]:
          "available": bool(st["running"] and st["text"]), "note": st["note"]},
         {"id": "anthropic", "label": f"Claude ({settings.get('BESTTAKE_MODEL')})", "available": bool(key),
          "note": "Best judging, and writes each build-up step in plain words, plus a quiz." if key
-         else "Add an Anthropic API key in Settings to enable."},
+         else "Add your Anthropic API key on your Profile page to enable."},
     ]
 
 
@@ -131,7 +131,7 @@ def owner_only(user=Depends(auth.current_user)):
 def me(user=Depends(auth.current_user)):
     with db() as c:
         used = c.execute("SELECT COUNT(*) FROM courses WHERE user_id=?", (user["id"],)).fetchone()[0]
-    eng = engines()
+    eng = engines(user)
     with db() as c:
         owner = bool(c.execute("SELECT is_owner FROM users WHERE id=?", (user["id"],)).fetchone()["is_owner"])
     return {
@@ -172,7 +172,7 @@ def create_course(body: CourseIn, user=Depends(auth.current_user)):
     topic = body.topic.strip()
     if len(topic) < 3:
         raise HTTPException(400, "Describe the topic in a few words.")
-    eng = {e["id"]: e for e in engines()}
+    eng = {e["id"]: e for e in engines(user)}
     engine = body.engine if body.engine in eng else "none"
     if not eng[engine]["available"]:
         raise HTTPException(400, f"{eng[engine]['label']} isn't available: {eng[engine]['note']}")
@@ -324,7 +324,7 @@ def get_lesson(lid: int, user=Depends(auth.current_user)):
         "course": {"id": course["id"], "title": course["title"], "topic": course["topic"],
                    "status": course["status"], "profile": course["profile"],
                    "provider": course.get("provider") or "none", "mode": course.get("mode") or "video",
-                   "engine_available": any(e["id"] == (course.get("provider") or "none") and e["available"] for e in engines())},
+                   "engine_available": any(e["id"] == (course.get("provider") or "none") and e["available"] for e in engines(user))},
         "outline": outline,
         "candidates": cands,
         "weights": scoring.PROFILES.get(course["profile"] or "balanced"),
@@ -451,11 +451,14 @@ def check_answer(lid: int, body: CheckIn, user=Depends(auth.current_user)):
     provider = course.get("provider") or "none"
     if provider == "none":
         raise HTTPException(400, "Answer checking needs a local model or Claude. Compare with the idea instead.")
+    llm.use_key(pipeline.user_key(user["id"]))
     try:
         r = tutor.check(protocol.active(user["id"])["text"], provider, item["question"], item.get("answer", ""),
                         item.get("missing_primitive") or {}, answer[:3000])
     except llm.ProviderError as e:
         raise HTTPException(503, f"The checker isn't available: {e}")
+    finally:
+        llm.use_key(None)
     with db() as c:
         c.execute("INSERT INTO answers(user_id,lesson_id,beat,answer,verdict,feedback,missing,created_at) VALUES(?,?,?,?,?,?,?,?)",
                   (user["id"], lid, beat_no, answer[:3000], r["verdict"], r["feedback"], r["missing_primitive"], time.time()))
@@ -566,8 +569,10 @@ def save_lesson(lid: int, body: SaveIn, user=Depends(auth.current_user)):
 @app.get("/api/profile")
 def get_profile(user=Depends(auth.current_user)):
     with db() as c:
-        u = dict(c.execute("SELECT id, email, name, plan, is_owner, background, goals, created_at FROM users WHERE id=?",
+        u = dict(c.execute("SELECT id, email, name, plan, is_owner, background, goals, created_at, anthropic_key FROM users WHERE id=?",
                            (user["id"],)).fetchone())
+        k = u.pop("anthropic_key") or ""
+        u["anthropic_key"] = {"set": bool(k), "hint": ("••••" + k[-4:]) if len(k) > 8 else ""}
         courses = [dict(r) for r in c.execute("""
           SELECT c.id, c.title, c.topic, c.mode, c.status, c.created_at,
             (SELECT COUNT(*) FROM lessons l WHERE l.course_id=c.id) AS total,
@@ -591,6 +596,8 @@ class ProfileIn(BaseModel):
     name: str | None = None
     background: str | None = None
     goals: str | None = None
+    anthropic_key: str | None = None
+    clear_key: bool = False
 
 
 @app.post("/api/profile")
@@ -600,7 +607,25 @@ def save_profile(body: ProfileIn, user=Depends(auth.current_user)):
                   ((body.name or "").strip()[:80] if body.name is not None else None,
                    (body.background or "").strip()[:2000] if body.background is not None else None,
                    (body.goals or "").strip()[:1000] if body.goals is not None else None, user["id"]))
+        if body.clear_key:
+            c.execute("UPDATE users SET anthropic_key=NULL WHERE id=?", (user["id"],))
+        elif body.anthropic_key and body.anthropic_key.strip():
+            key = body.anthropic_key.strip()
+            if not key.startswith("sk-ant-"):
+                raise HTTPException(400, "That doesn't look like an Anthropic key. It starts with sk-ant-.")
+            c.execute("UPDATE users SET anthropic_key=? WHERE id=?", (key[:300], user["id"]))
     return {"ok": True}
+
+
+@app.post("/api/profile/test-key")
+def test_key(user=Depends(auth.current_user)):
+    llm.use_key(pipeline.user_key(user["id"]))
+    try:
+        return {"ok": True, "message": llm.test_anthropic()}
+    except Exception as e:
+        return {"ok": False, "message": str(e)[:300]}
+    finally:
+        llm.use_key(None)
 
 
 class PasswordIn(BaseModel):

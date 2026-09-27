@@ -235,9 +235,11 @@ async function viewHome() {
   const syncEngine = () => {
     const e = engines.find((x) => x.id === engineSel.value) || engines[0];
     const basic = e.id === "none";
-    document.getElementById("enginenote").textContent = (basic
+    const help = engines.filter((x) => !x.available).length
+      ? ` <a href="#/profile">Add your Claude key</a>${me.user.is_owner ? ` · <a href="#/settings">Set up the local model</a>` : ""}` : "";
+    document.getElementById("enginenote").innerHTML = esc((basic
       ? "Video build-up: pulls the diagrams and animations out of the best video. "
-      : "Tutor mode: designs its own first-principles lessons and visuals, using the best videos as source material. ") + (e.note || "");
+      : "Tutor mode: designs its own first-principles lessons and visuals, using the best videos as source material. ") + (e.note || "")) + help;
     document.getElementById("lessonsreq").textContent = basic ? "(required in Basic mode, or pick a template)" : "(optional; leave empty and the tutor plans from first principles)";
     document.querySelectorAll(".ai-only").forEach((el) => { el.hidden = basic; });
     document.getElementById("buildhint").textContent = basic
@@ -707,6 +709,14 @@ async function viewProfile() {
         <textarea id="pgoals" rows="2" maxlength="1000" placeholder="Design my own SaaS backends with confidence.">${esc(u.goals || "")}</textarea></div>
       <button type="submit">Save profile</button>
     </form>
+    <form class="block" id="kform"><h2>Your Claude key</h2>
+      <p class="muted small">Optional. With your own Anthropic API key, the Claude engine is available to you and its usage is billed to your key. Stored on this server and only ever shown masked.</p>
+      <div class="field"><label for="pkey">Anthropic API key</label>
+        <input id="pkey" type="password" autocomplete="off" placeholder="${u.anthropic_key.set ? `Saved (${esc(u.anthropic_key.hint)}). Paste a new key to replace it.` : "sk-ant-…"}"></div>
+      <div class="askbtns"><button type="submit">Save key</button>
+        ${u.anthropic_key.set ? `<button type="button" class="ghost" id="ktest">Test key</button><button type="button" class="ghost" id="kclear">Remove key</button>` : ""}</div>
+      <p class="hint" id="kout"></p>
+    </form>
     <form class="block" id="pwform"><h2>Password</h2>
       <div class="row3"><div class="field"><label for="pwcur">Current password</label><input id="pwcur" type="password" autocomplete="current-password"></div>
       <div class="field"><label for="pwnew">New password</label><input id="pwnew" type="password" autocomplete="new-password" minlength="8"></div></div>
@@ -721,6 +731,18 @@ async function viewProfile() {
       await loadMe(); toast("Profile saved. New lessons will use it.");
     } catch (ex) { toast(ex.message); }
   };
+  const kout = document.getElementById("kout");
+  document.getElementById("kform").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = document.getElementById("pkey").value.trim();
+    if (!v) { kout.textContent = "Paste a key first."; return; }
+    try { await api("/api/profile", { method: "POST", body: { anthropic_key: v } }); toast("Key saved. The Claude engine is now available to you."); route(); }
+    catch (ex) { kout.textContent = ex.message; kout.className = "hint bad"; }
+  };
+  const kt = document.getElementById("ktest");
+  if (kt) kt.onclick = async () => { kout.textContent = "Testing…"; const r = await api("/api/profile/test-key", { method: "POST" }); kout.textContent = r.message; kout.className = "hint " + (r.ok ? "ok" : "bad"); };
+  const kc = document.getElementById("kclear");
+  if (kc) kc.onclick = async () => { await api("/api/profile", { method: "POST", body: { clear_key: true } }); toast("Key removed"); route(); };
   document.getElementById("pwform").onsubmit = async (e) => {
     e.preventDefault();
     const err = document.getElementById("pwerr"); err.textContent = "";

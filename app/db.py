@@ -73,6 +73,7 @@ def init():
         add_col("lessons", "meta", "TEXT")
         add_col("users", "background", "TEXT")
         add_col("users", "goals", "TEXT")
+        add_col("users", "anthropic_key", "TEXT")
         ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         if "is_owner" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0")

@@ -11,6 +11,16 @@ from .config import OLLAMA_NUM_CTX
 
 _clients: dict = {}
 _lock = threading.Lock()
+_local = threading.local()
+
+
+def use_key(key: str | None):
+    """Use this Anthropic key for calls made on the current thread (a user's own key)."""
+    _local.key = key or None
+
+
+def current_key() -> str:
+    return getattr(_local, "key", None) or settings.get("ANTHROPIC_API_KEY")
 
 
 class ProviderError(RuntimeError):
@@ -22,13 +32,14 @@ class ProviderUnavailable(ProviderError):
 
 
 def client():
-    key = settings.get("ANTHROPIC_API_KEY")
+    key = current_key()
     if not key:
-        raise ProviderUnavailable("No Anthropic API key. Add one in Settings, or pick another ranking engine.")
+        raise ProviderUnavailable("No Anthropic API key. Add one on your Profile page or in Settings, or pick another engine.")
     with _lock:
         if key not in _clients:
             import anthropic
-            _clients.clear()
+            if len(_clients) > 20:
+                _clients.clear()
             _clients[key] = anthropic.Anthropic(api_key=key, max_retries=4)
         return _clients[key]
 

@@ -86,5 +86,7 @@ command -v open >/dev/null 2>&1 && open "$URL"
 echo "Pushing to GitHub..."
 if bash publish.sh; then :; else echo "GitHub push skipped. The app is still running at $URL"; fi
 
+OWNERS="$("$DIR/.venv/bin/python" -c "import sys; sys.path.insert(0, '$DIR'); from app.db import connect, init; init(); print(', '.join(r[0] for r in connect().execute('SELECT email FROM users WHERE is_owner=1')))" 2>/dev/null || true)"
 echo
+[ -n "$OWNERS" ] && echo "Owner account (sees Settings): $OWNERS"
 echo "Default ranking engine: $(setting AI_PROVIDER). Add API keys or switch engines any time in Settings ($URL/#/settings)."
