@@ -309,6 +309,7 @@ def get_lesson(lid: int, user=Depends(auth.current_user)):
         cands = [dict(r) for r in c.execute("SELECT * FROM candidates WHERE lesson_id=? ORDER BY rank", (lid,))]
         prog = c.execute("SELECT completed, quiz_score FROM progress WHERE user_id=? AND lesson_id=?",
                          (user["id"], lid)).fetchone()
+        is_saved = bool(c.execute("SELECT 1 FROM saved WHERE user_id=? AND lesson_id=?", (user["id"], lid)).fetchone())
     for cd in cands:
         for k in ("meta", "signals", "judge", "contributions"):
             cd[k] = json.loads(cd[k] or "{}")
@@ -332,6 +333,7 @@ def get_lesson(lid: int, user=Depends(auth.current_user)):
         "position": i + 1,
         "total": len(ids),
         "progress": dict(prog) if prog else {"completed": 0, "quiz_score": None},
+        "saved": is_saved,
     }
 
 
@@ -543,4 +545,77 @@ def add_protocol_note(body: NoteIn, user=Depends(auth.current_user)):
     if len(body.text.strip()) < 3:
         raise HTTPException(400, "Write a note first.")
     protocol.add_note(user["id"], body.lesson_id, body.text)
+    return {"ok": True}
+
+
+class SaveIn(BaseModel):
+    saved: bool
+
+
+@app.post("/api/lessons/{lid}/save")
+def save_lesson(lid: int, body: SaveIn, user=Depends(auth.current_user)):
+    with db() as c:
+        _own_lesson(c, lid, user["id"])
+        if body.saved:
+            c.execute("INSERT OR IGNORE INTO saved(user_id, lesson_id, created_at) VALUES(?,?,?)", (user["id"], lid, time.time()))
+        else:
+            c.execute("DELETE FROM saved WHERE user_id=? AND lesson_id=?", (user["id"], lid))
+    return {"saved": body.saved}
+
+
+@app.get("/api/profile")
+def get_profile(user=Depends(auth.current_user)):
+    with db() as c:
+        u = dict(c.execute("SELECT id, email, name, plan, is_owner, background, goals, created_at FROM users WHERE id=?",
+                           (user["id"],)).fetchone())
+        courses = [dict(r) for r in c.execute("""
+          SELECT c.id, c.title, c.topic, c.mode, c.status, c.created_at,
+            (SELECT COUNT(*) FROM lessons l WHERE l.course_id=c.id) AS total,
+            (SELECT COUNT(*) FROM progress p JOIN lessons l ON l.id=p.lesson_id WHERE l.course_id=c.id AND p.user_id=? AND p.completed=1) AS done
+          FROM courses c WHERE c.user_id=? ORDER BY c.created_at DESC""", (user["id"], user["id"]))]
+        saved = [dict(r) for r in c.execute("""
+          SELECT l.id, l.title, l.module_title, c.title AS course_title, c.id AS course_id, s.created_at
+          FROM saved s JOIN lessons l ON l.id=s.lesson_id JOIN courses c ON c.id=l.course_id
+          WHERE s.user_id=? ORDER BY s.created_at DESC""", (user["id"],))]
+        done = c.execute("SELECT COUNT(*) FROM progress WHERE user_id=? AND completed=1", (user["id"],)).fetchone()[0]
+        answered = c.execute("SELECT COUNT(*), SUM(verdict='got_it') FROM answers WHERE user_id=?", (user["id"],)).fetchone()
+        rules = 0
+        for r in c.execute("""SELECT l.content FROM lessons l JOIN courses c ON c.id=l.course_id
+                              WHERE c.user_id=? AND l.status='ready'""", (user["id"],)):
+            rules += len(json.loads(r["content"] or "{}").get("rules") or [])
+    return {"user": u, "courses": courses, "saved": saved,
+            "stats": {"lessons_done": done, "questions": answered[0] or 0, "derived": answered[1] or 0, "rules": rules}}
+
+
+class ProfileIn(BaseModel):
+    name: str | None = None
+    background: str | None = None
+    goals: str | None = None
+
+
+@app.post("/api/profile")
+def save_profile(body: ProfileIn, user=Depends(auth.current_user)):
+    with db() as c:
+        c.execute("UPDATE users SET name=COALESCE(?, name), background=COALESCE(?, background), goals=COALESCE(?, goals) WHERE id=?",
+                  ((body.name or "").strip()[:80] if body.name is not None else None,
+                   (body.background or "").strip()[:2000] if body.background is not None else None,
+                   (body.goals or "").strip()[:1000] if body.goals is not None else None, user["id"]))
+    return {"ok": True}
+
+
+class PasswordIn(BaseModel):
+    current: str
+    new: str
+
+
+@app.post("/api/profile/password")
+def change_password(body: PasswordIn, request: Request, user=Depends(auth.current_user)):
+    if len(body.new) < 8:
+        raise HTTPException(400, "Use a new password with at least 8 characters.")
+    with db() as c:
+        row = c.execute("SELECT pw_hash FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not auth.check_pw(body.current, row["pw_hash"]):
+            raise HTTPException(400, "Your current password isn't right.")
+        c.execute("UPDATE users SET pw_hash=? WHERE id=?", (auth.hash_pw(body.new), user["id"]))
+        c.execute("DELETE FROM sessions WHERE user_id=? AND token!=?", (user["id"], request.cookies.get(auth.COOKIE) or ""))
     return {"ok": True}

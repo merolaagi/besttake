@@ -25,6 +25,15 @@ The visuals are drawn by BestTake from a small scene language the model writes:
 
 The protocol itself is editable and versioned on the Tutor protocol page. Notes you leave at the end of each lesson ("where did the method break?") feed the next version.
 
+Each beat shows two things side by side:
+
+- BestTake's own visual: an architecture diagram, a flowchart, a sequence diagram, a traced graph, a table, or code, building up beat by beat
+- the matching frame or animated clip from the best source video, in the order the video builds the idea
+
+With the Claude engine, the tutor also writes a custom animation for each lesson. It's a self-contained SVG or canvas scene that steps in sync with the beats, and it runs in a locked-down sandbox with no network access. Press Play and the lesson advances on its own, paced by the read-aloud narration, pausing at every "Your turn" question.
+
+Source video moments open in an inline player; nothing opens a new window. On your profile, "What you already know" feeds the tutor's CONNECT beats, and ☆ Save keeps lessons in your library.
+
 **Video build-up** (Basic, no AI) extracts the diagrams and animations from the best video, as described below.
 
 ## What a video build-up lesson is

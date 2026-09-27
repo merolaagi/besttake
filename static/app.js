@@ -37,7 +37,31 @@ const num = (n) => (n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : 
 const helpers = () => ({
   esc, md, fmt, api, toast,
   setKeys: (fn) => { if (state.keys) window.removeEventListener("keydown", state.keys); state.keys = fn; window.addEventListener("keydown", fn); },
+  onLeave: (fn) => { state.leave = fn; },
 });
+
+function openVideo(id, t = 0) {
+  closeVideo();
+  const wrap = document.createElement("div");
+  wrap.className = "vmodal";
+  wrap.setAttribute("role", "dialog");
+  wrap.setAttribute("aria-label", "Source video");
+  const p = new URLSearchParams({ start: String(Math.max(0, Math.round(t))), autoplay: "1", rel: "0", modestbranding: "1" });
+  wrap.innerHTML = `<div class="vbox"><button class="ghost vclose" aria-label="Close video">Close</button>
+    <div class="vframe"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?${p}" title="Source video"
+      allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div></div>`;
+  wrap.addEventListener("click", (e) => { if (e.target === wrap || e.target.classList.contains("vclose")) closeVideo(); });
+  document.body.appendChild(wrap);
+  wrap.querySelector(".vclose").focus();
+}
+function closeVideo() { document.querySelectorAll(".vmodal").forEach((m) => m.remove()); }
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-yt]");
+  if (!a) return;
+  e.preventDefault();
+  openVideo(a.dataset.yt, +a.dataset.t || 0);
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeVideo(); });
 
 function toast(msg) {
   const t = document.getElementById("toast");
@@ -112,7 +136,7 @@ function renderNav() {
   if (!state.me) { nav.innerHTML = ""; return; }
   const u = state.me.user, usage = state.me.usage;
   const plan = u.plan === "free" ? `Free plan, ${usage.courses} of ${usage.limit} courses` : "Pro";
-  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a><a href="#/protocol">Tutor protocol</a>${u.is_owner ? `<a href="#/settings">Settings</a>` : ""}<button class="link" id="signout">Sign out</button>`;
+  nav.innerHTML = `<span class="plan">${esc(plan)}</span><a href="#/">My courses</a><a href="#/profile">${esc(u.name || "Profile")}</a><a href="#/protocol">Tutor protocol</a>${u.is_owner ? `<a href="#/settings">Settings</a>` : ""}<button class="link" id="signout">Sign out</button>`;
   document.getElementById("signout").onclick = async () => {
     await api("/api/logout", { method: "POST" }).catch(() => {});
     state.me = null; renderNav(); location.hash = "#/signin";
@@ -356,7 +380,8 @@ async function viewLesson(id) {
   const data = await api(`/api/lessons/${id}`);
   const { lesson, course, outline, candidates, prev, next, position, total, progress } = data;
   const c = lesson.content;
-  const head = `<div class="lesson-head"><div class="where">${esc(lesson.module_title)}, lesson ${position} of ${total}</div><h1>${esc(lesson.title)}</h1></div>`;
+  const head = `<div class="lesson-head"><div class="where">${esc(lesson.module_title)}, lesson ${position} of ${total}</div>
+    <div class="titlerow"><h1>${esc(lesson.title)}</h1>${c ? `<button class="ghost small savebtn" id="savebtn" aria-pressed="${data.saved}">${data.saved ? "★ Saved" : "☆ Save"}</button>` : ""}</div></div>`;
 
   if (!c) {
     const live = ACTIVE.includes(course.status);
@@ -385,6 +410,7 @@ async function viewLesson(id) {
       </div></article></div>`;
     wireOutline();
     BTTutor.mountTutorLesson(data, helpers());
+    wireSave(id, data.saved);
     document.getElementById("done").onclick = async () => {
       const nowDone = !progress.completed;
       try {
@@ -413,10 +439,10 @@ async function viewLesson(id) {
       <div class="filmstrip" role="tablist" aria-label="All steps">
         ${steps.map((st, i) => `<button role="tab" data-i="${i}" title="${esc(st.title || `Step ${i + 1}`)}"><img src="${esc(st.image)}" alt="" loading="lazy">${st.clip ? `<span class="motion" aria-label="animated">▶</span>` : ""}</button>`).join("")}
       </div>
-      <p class="credit">Visuals and narration from <a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a> by ${esc(src.channel)}${src.rank > 1 ? ` (ranked #${src.rank}; the top pick had fewer visuals)` : ""}.</p>
+      <p class="credit">Visuals and narration from <a href="#" data-yt="${esc(src.id)}" data-t="0">${esc(src.title)}</a> by ${esc(src.channel)}${src.rank > 1 ? ` (ranked #${src.rank}; the top pick had fewer visuals)` : ""}.</p>
     </section>` : `
     <div class="notice"><p><strong>No visuals were extracted for this lesson.</strong> ${esc(c.extract_error || "")}</p>
-      ${src.url ? `<p style="margin:0">Best source: <a href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.title)}</a> by ${esc(src.channel)}.</p>` : ""}
+      ${src.url ? `<p style="margin:0">Best source: <a href="#" data-yt="${esc(src.id)}" data-t="0">${esc(src.title)}</a> by ${esc(src.channel)}.</p>` : ""}
       <button class="ghost" id="rebuild2" style="margin-top:.8rem">Try this lesson again</button></div>`}
     <div class="prose">
       ${(c.concept_marks || []).length ? `<section class="block"><h2>Concepts in this lesson</h2><ul class="marks">
@@ -458,7 +484,7 @@ async function viewLesson(id) {
       ? `<p>${esc(st.explain)}</p>${st.text ? `<details><summary>What the narrator says</summary><p class="narr">${esc(st.text)}</p></details>` : ""}`
       : st.text ? `<p class="narr">${esc(st.text)}</p>` : "";
     document.getElementById("caption").innerHTML = `<h3>${esc(st.title || `Step ${cur + 1}`)}</h3>${body}
-      <p class="small muted">At ${fmt(st.t)} in the source. <a href="${esc(ytAt(st.start))}" target="_blank" rel="noopener">Open this moment on YouTube</a></p>`;
+      <p class="small muted">At ${fmt(st.t)} in the source. <a href="#" data-yt="${esc(src.id)}" data-t="${st.start}">Watch this moment</a></p>`;
     document.getElementById("counter").textContent = `Step ${cur + 1} of ${steps.length}`;
     document.getElementById("prevstep").disabled = cur === 0;
     document.getElementById("nextstep").disabled = cur === steps.length - 1;
@@ -484,9 +510,10 @@ async function viewLesson(id) {
       let idx = -1;
       steps.forEach((st, i) => { if (st.start <= t + 5) idx = i; });
       if (idx >= 0) { show(idx); document.getElementById("stage").scrollIntoView({ behavior: "smooth", block: "center" }); }
-      else if (src.url) window.open(ytAt(t), "_blank", "noopener");
+      else if (src.id) openVideo(src.id, t);
     };
   });
+  wireSave(id, data.saved);
   const rb = document.getElementById("rebuild2");
   if (rb) rb.onclick = async () => { try { await api(`/api/lessons/${id}/rebuild`, { method: "POST" }); toast("Rebuilding lesson"); location.hash = `#/course/${course.id}`; } catch (ex) { toast(ex.message); } };
   if (c.diagram) renderDiagram(c.diagram);
@@ -508,7 +535,7 @@ function candRow(cd, i) {
   return `<div class="cand ${i === 0 ? "pick" : ""}">
     <div class="score">${Math.round(cd.score)}<small>${i === 0 ? "the pick" : `#${cd.rank}`}</small></div>
     <div>
-      <div class="title"><a href="${esc(cd.url)}" target="_blank" rel="noopener">${esc(cd.title)}</a></div>
+      <div class="title"><a href="#" data-yt="${esc(cd.video_id)}" data-t="0">${esc(cd.title)}</a></div>
       <div class="stats"><span>${esc(cd.channel)}</span><span>${fmt(cd.duration)}</span><span>${num(s.views)} views</span>
         ${s.like_rate_pct != null ? `<span>${s.like_rate_pct}% liked</span>` : ""}<span>${num(s.views_per_sub)}× channel size</span>
         ${s.relevance != null ? `<span class="${s.relevance < 0.5 ? "off" : ""}">${Math.round(s.relevance * 100)}% on-topic</span>` : ""}</div>
@@ -636,6 +663,74 @@ async function viewSettings() {
   });
 }
 
+function wireSave(lessonId, saved) {
+  const b = document.getElementById("savebtn");
+  if (!b) return;
+  let on = !!saved;
+  b.onclick = async () => {
+    try {
+      on = (await api(`/api/lessons/${lessonId}/save`, { method: "POST", body: { saved: !on } })).saved;
+      b.textContent = on ? "★ Saved" : "☆ Save";
+      b.setAttribute("aria-pressed", String(on));
+      toast(on ? "Saved to your library" : "Removed from your library");
+    } catch (ex) { toast(ex.message); }
+  };
+}
+
+/* ---------- Profile ---------- */
+
+async function viewProfile() {
+  const { user: u, courses, saved, stats } = await api("/api/profile");
+  app.innerHTML = `<div class="settings profile">
+    <h1>${esc(u.name || "Your profile")}</h1>
+    <p class="muted">${esc(u.email)} · ${u.plan === "free" ? "Free plan" : "Pro"} · member since ${new Date(u.created_at * 1000).toLocaleDateString()}</p>
+    <div class="statrow">
+      <div><b>${stats.lessons_done}</b><span>lessons done</span></div>
+      <div><b>${stats.derived}/${stats.questions}</b><span>ideas derived</span></div>
+      <div><b>${stats.rules}</b><span>rules compressed</span></div>
+      <div><b>${courses.length}</b><span>courses</span></div>
+    </div>
+    <section class="block"><h2>Saved lessons</h2>
+      ${saved.length ? `<ul class="library">${saved.map((l) => `<li><a href="#/lesson/${l.id}">${esc(l.title)}</a><span class="small muted">${esc(l.course_title || "")}, ${esc(l.module_title || "")}</span></li>`).join("")}</ul>`
+        : `<p class="muted">Press ☆ Save on any lesson to keep it here.</p>`}
+    </section>
+    <section class="block"><h2>Your courses</h2>
+      ${courses.length ? `<ul class="library">${courses.map((c) => `<li><a href="#/course/${c.id}">${esc(c.title || c.topic)}</a><span class="small muted">${c.mode === "tutor" ? "Tutor" : "Video build-up"} · ${c.done} of ${c.total} lessons done</span></li>`).join("")}</ul>`
+        : `<p class="muted">No courses yet. <a href="#/">Build one</a>.</p>`}
+    </section>
+    <form class="block" id="pform"><h2>About you</h2>
+      <p class="muted small">The tutor uses this to connect new ideas to what you already know, and to pick examples from your world.</p>
+      <div class="field"><label for="pname">Name</label><input id="pname" value="${esc(u.name || "")}" maxlength="80" autocomplete="name"></div>
+      <div class="field"><label for="pbg">What you already know</label>
+        <textarea id="pbg" rows="4" maxlength="2000" placeholder="I run a gas station and convenience store. I write Python and have built FastAPI apps. I know basic statistics.">${esc(u.background || "")}</textarea></div>
+      <div class="field"><label for="pgoals">What you're aiming for</label>
+        <textarea id="pgoals" rows="2" maxlength="1000" placeholder="Design my own SaaS backends with confidence.">${esc(u.goals || "")}</textarea></div>
+      <button type="submit">Save profile</button>
+    </form>
+    <form class="block" id="pwform"><h2>Password</h2>
+      <div class="row3"><div class="field"><label for="pwcur">Current password</label><input id="pwcur" type="password" autocomplete="current-password"></div>
+      <div class="field"><label for="pwnew">New password</label><input id="pwnew" type="password" autocomplete="new-password" minlength="8"></div></div>
+      <p class="error" id="pwerr"></p>
+      <button type="submit" class="ghost">Change password</button>
+    </form>
+  </div>`;
+  document.getElementById("pform").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/profile", { method: "POST", body: { name: document.getElementById("pname").value, background: document.getElementById("pbg").value, goals: document.getElementById("pgoals").value } });
+      await loadMe(); toast("Profile saved. New lessons will use it.");
+    } catch (ex) { toast(ex.message); }
+  };
+  document.getElementById("pwform").onsubmit = async (e) => {
+    e.preventDefault();
+    const err = document.getElementById("pwerr"); err.textContent = "";
+    try {
+      await api("/api/profile/password", { method: "POST", body: { current: document.getElementById("pwcur").value, new: document.getElementById("pwnew").value } });
+      document.getElementById("pwcur").value = ""; document.getElementById("pwnew").value = ""; toast("Password changed. Other devices were signed out.");
+    } catch (ex) { err.textContent = ex.message; }
+  };
+}
+
 /* ---------- Tutor protocol ---------- */
 
 async function viewProtocol() {
@@ -663,6 +758,8 @@ async function route() {
   clearTimeout(state.poll);
   if (state.keys) { window.removeEventListener("keydown", state.keys); state.keys = null; }
   if ("speechSynthesis" in window) speechSynthesis.cancel();
+  if (state.leave) { state.leave(); state.leave = null; }
+  closeVideo();
   const h = location.hash || "#/";
   try {
     if (h.startsWith("#/signin")) return viewSignin("signin");
@@ -674,6 +771,7 @@ async function route() {
     if ((m = h.match(/^#\/lesson\/(\d+)/))) return await viewLesson(+m[1]);
     if (h.startsWith("#/settings")) return await viewSettings();
     if (h.startsWith("#/protocol")) return await viewProtocol();
+    if (h.startsWith("#/profile")) return await viewProfile();
     return await viewHome();
   } catch (ex) {
     if (state.me) app.innerHTML = `<p class="notice">${esc(ex.message)} <a href="#/">Back to your courses</a></p>`;

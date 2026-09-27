@@ -128,3 +128,21 @@ def test_anthropic() -> str:
     msg = client().messages.create(model=settings.get("BESTTAKE_MODEL"), max_tokens=5,
                                    messages=[{"role": "user", "content": "Reply with OK."}])
     return f"Connected. {settings.get('BESTTAKE_MODEL')} replied."
+
+
+def ask_text(prompt: str, system: str, provider: str = "anthropic", max_tokens: int = 12000) -> str:
+    if provider == "ollama":
+        user = {"role": "user", "content": prompt}
+        body = {"model": settings.get("OLLAMA_MODEL"), "stream": False,
+                "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.3, "num_predict": max_tokens},
+                "messages": [{"role": "system", "content": system}, user]}
+        req = urllib.request.Request(settings.get("OLLAMA_URL").rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=1200) as r:
+                return json.loads(r.read())["message"]["content"]
+        except urllib.error.URLError as e:
+            raise ProviderUnavailable(f"Ollama isn't reachable ({e}).") from e
+    if provider != "anthropic":
+        raise ProviderUnavailable(f"No AI model is configured for the '{provider}' engine.")
+    return _anthropic_chat(None, system, prompt, None, max_tokens)

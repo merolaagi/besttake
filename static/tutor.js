@@ -15,12 +15,15 @@ const escT = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", 
 
 /* ---------- Diagram state: replay ops up to a beat ---------- */
 
-function diagramState(beats, upto) {
-  const st = { nodes: new Map(), edges: new Map(), note: "", flows: [], hl: new Map(), fresh: new Set(), freshEdges: new Set() };
+function sceneOf(v) { return (v && v.scene) || "main"; }
+
+function diagramState(beats, upto, scene = "main") {
+  const st = { nodes: new Map(), edges: new Map(), note: "", flows: [], hl: new Map(), fresh: new Set(), freshEdges: new Set(), direction: null };
   for (let i = 0; i <= upto; i++) {
     const v = beats[i] && beats[i].visual;
-    if (!v || v.type !== "diagram") continue;
+    if (!v || v.type !== "diagram" || sceneOf(v) !== scene) continue;
     const cur = i === upto;
+    if (v.direction) st.direction = v.direction;
     for (const o of v.ops) {
       const n = st.nodes.get(o.id);
       switch (o.op) {
@@ -64,7 +67,7 @@ function layout(st) {
   ids.forEach((id) => { const k = rank.get(id); if (!cols.has(k)) cols.set(k, []); cols.get(k).push(id); });
   const nRanks = cols.size ? Math.max(...cols.keys()) + 1 : 1;
   const maxRows = Math.max(1, ...[...cols.values()].map((c) => c.length));
-  const vertical = nRanks > 5 && maxRows <= 3;
+  const vertical = st.direction === "down" ? true : st.direction === "right" ? false : (nRanks > 5 && maxRows <= 3);
   const slot = new Map();
   [...cols.keys()].sort((a, b) => a - b).forEach((k) => {
     const col = cols.get(k);
@@ -110,6 +113,9 @@ function wrapLabel(text, max = 17) {
 }
 
 function nodeShape(g, kind) {
+  if (kind === "decision") { el("polygon", { class: "shape", points: `${NW / 2},-6 ${NW + 4},${NH / 2} ${NW / 2},${NH + 6} -4,${NH / 2}` }, g); return; }
+  if (kind === "io") { el("polygon", { class: "shape", points: `16,0 ${NW},0 ${NW - 16},${NH} 0,${NH}` }, g); return; }
+  if (kind === "start" || kind === "end") { el("rect", { class: "shape", width: NW, height: NH, rx: NH / 2 }, g); return; }
   if (kind === "database" || kind === "storage") {
     const e = 9;
     el("path", { class: "shape", d: `M0,${e} C0,-3 ${NW},-3 ${NW},${e} L${NW},${NH - e} C${NW},${NH + 3} 0,${NH + 3} 0,${NH - e} Z` }, g);
@@ -220,6 +226,56 @@ class DiagramView {
   }
 }
 
+/* ---------- Sequence diagram ---------- */
+
+function sequenceState(beats, upto) {
+  const st = { actors: [], labels: new Map(), msgs: [], note: "" };
+  for (let i = 0; i <= upto; i++) {
+    const v = beats[i] && beats[i].visual;
+    if (!v || v.type !== "sequence") continue;
+    for (const o of v.ops) {
+      if (o.op === "actor" && !st.labels.has(o.id)) { st.actors.push(o.id); st.labels.set(o.id, o.label); }
+      else if (o.op === "msg") st.msgs.push({ ...o, fresh: i === upto });
+      else if (o.op === "note" && i === upto) st.note = o.text;
+    }
+  }
+  return st;
+}
+
+function renderSequence(host, st) {
+  const colW = 200, top = 24, boxH = 42, rowH = 46, maxRows = 9;
+  const msgs = st.msgs.slice(-maxRows);
+  const W = Math.max(560, 60 + (st.actors.length - 1) * colW + 160), H = top + boxH + 30 + Math.max(1, msgs.length) * rowH + 40;
+  host.innerHTML = "";
+  const svg = el("svg", { class: "diagram-svg seq-svg", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Sequence diagram" }, host);
+  const defs = el("defs", {}, svg);
+  const m = el("marker", { id: "sarrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, defs);
+  el("path", { d: "M0,0 L10,5 L0,10 z", class: "arrowhead" }, m);
+  const x = (id) => 80 + st.actors.indexOf(id) * colW + 60;
+  st.actors.forEach((id) => {
+    const g = el("g", { class: "node kind-service" }, svg);
+    el("rect", { class: "shape", x: x(id) - 70, y: top, width: 140, height: boxH, rx: 8 }, g);
+    const t = el("text", { class: "node-label", x: x(id), y: top + boxH / 2 + 5, "text-anchor": "middle" }, g); t.textContent = st.labels.get(id);
+    el("line", { class: "lifeline", x1: x(id), x2: x(id), y1: top + boxH, y2: H - 30 }, svg);
+  });
+  msgs.forEach((mm, i) => {
+    const y = top + boxH + 30 + i * rowH, x1 = x(mm.from), x2 = x(mm.to);
+    const g = el("g", { class: `msg ${mm.reply ? "reply" : ""} ${mm.fresh ? "fresh draw" : ""}` }, svg);
+    const d = x1 === x2 ? `M${x1},${y} h40 v18 h-40` : `M${x1},${y} L${x2},${y}`;
+    const path = el("path", { class: "edge-line", d, pathLength: "1", "marker-end": "url(#sarrow)" }, g);
+    const lt = el("text", { class: "edge-label", x: (x1 + x2) / 2 + (x1 === x2 ? 50 : 0), y: y - 7, "text-anchor": x1 === x2 ? "start" : "middle" }, g); lt.textContent = mm.label || "";
+    if (mm.fresh) {
+      const pid = `sp${i}${Math.random().toString(36).slice(2, 6)}`;
+      path.setAttribute("id", pid);
+      const c = el("circle", { r: 5, class: "flow-dot", opacity: 0 }, g);
+      el("set", { attributeName: "opacity", to: "1", begin: "0.3s" }, c);
+      const am = el("animateMotion", { dur: "1.4s", begin: "0.3s", repeatCount: "indefinite" }, c);
+      el("mpath", { href: `#${pid}` }, am);
+    }
+  });
+  if (st.note) { const n = el("text", { class: "diagram-note", x: W / 2, y: H - 8, "text-anchor": "middle" }, svg); n.textContent = st.note; }
+}
+
 /* ---------- Chart, table, code ---------- */
 
 function niceTicks(lo, hi, n = 5) {
@@ -263,6 +319,14 @@ function renderChart(host, v) {
       const d = s.points.map((p, j) => `${j ? "L" : "M"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ");
       const path = el("path", { class: `series s${i}`, d, pathLength: "1" }, svg);
       path.style.animationDelay = `${i * 300}ms`;
+      if (v.trace && i === 0) {
+        const pid = `tr${Math.random().toString(36).slice(2, 8)}`;
+        el("path", { id: pid, d, fill: "none", stroke: "none" }, svg);
+        const c = el("circle", { r: 7, class: "trace-dot", opacity: 0 }, svg);
+        el("set", { attributeName: "opacity", to: "1", begin: "1.4s" }, c);
+        const am = el("animateMotion", { dur: "4s", begin: "1.4s", repeatCount: "indefinite" }, c);
+        el("mpath", { href: `#${pid}` }, am);
+      }
     });
     if (v.series.length > 1) v.series.forEach((s, i) => {
       el("line", { class: `series s${i}`, x1: L + i * 150, x2: L + i * 150 + 22, y1: H - 14, y2: H - 14, style: "animation:none;stroke-dasharray:none" }, svg);
@@ -302,8 +366,15 @@ class Stage {
       if (!anyDiagram) { this.host.innerHTML = `<div class="stage-empty">The picture builds up as we go.</div>`; this.mode = "empty"; this.diagram = null; return; }
     }
     if (!v || v.type === "diagram") {
-      if (this.mode !== "diagram") { this.host.innerHTML = ""; this.diagram = new DiagramView(this.host); this.mode = "diagram"; }
-      this.diagram.render(diagramState(this.beats, k));
+      let scene = "main";
+      for (let q = k; q >= 0; q--) { const vq = this.beats[q].visual; if (vq && vq.type === "diagram") { scene = sceneOf(vq); break; } }
+      if (this.mode !== "diagram" || this.scene !== scene) { this.host.innerHTML = ""; this.diagram = new DiagramView(this.host); this.mode = "diagram"; this.scene = scene; }
+      this.diagram.render(diagramState(this.beats, k, scene));
+      return;
+    }
+    if (v.type === "sequence") {
+      this.diagram = null; this.mode = "sequence"; this.key = null;
+      renderSequence(this.host, sequenceState(this.beats, k));
       return;
     }
     const key = `${j}`;
@@ -324,13 +395,25 @@ function tutorLessonHtml(data, h) {
         .filter(([, v]) => v).map(([k, v]) => `<li><b>${k}</b><span>${h.esc(v)}</span></li>`).join("")}</ol>` : "";
   return `
     <div class="lesson-head"><div class="where"><span class="stage-chip st-${h.esc(ch.stage || "derive")}">${h.esc(STAGE_LABEL[ch.stage] || "Derive")}</span> ${h.esc(lesson.module_title)}, lesson ${data.position} of ${data.total}</div>
-      <h1>${h.esc(lesson.title)}</h1>${c.goal ? `<p class="hook">${h.esc(c.goal)}</p>` : ""}${chain}</div>
+      <div class="titlerow"><h1>${h.esc(lesson.title)}</h1>
+        <button class="ghost small savebtn" id="savebtn" aria-pressed="${data.saved}">${data.saved ? "★ Saved" : "☆ Save"}</button></div>
+      ${c.goal ? `<p class="hook">${h.esc(c.goal)}</p>` : ""}${chain}</div>
     <section class="tplayer" aria-label="Lesson">
-      <div class="stage2" id="stage2"></div>
+      ${c.animation ? `<div class="viewtabs" role="tablist" aria-label="View">
+        <button role="tab" data-view="anim" aria-selected="true">Animation</button>
+        <button role="tab" data-view="scene" aria-selected="false">Diagrams</button></div>` : ""}
+      <div class="duo ${(c.frames || []).length ? "" : "solo"}">
+        <div class="pane">
+          ${c.animation ? `<iframe class="animframe" id="animframe" sandbox="allow-scripts" title="Lesson animation"></iframe>` : ""}
+          <div class="stage2" id="stage2" ${c.animation ? "hidden" : ""}></div>
+        </div>
+        ${(c.frames || []).length ? `<figure class="srcpane" id="srcpane" aria-label="From the source video"></figure>` : ""}
+      </div>
       <div class="beats-bar" role="tablist" aria-label="Beats">${c.beats.map((b, i) => `<button role="tab" class="k-${b.kind}" data-i="${i}" title="${h.esc(STAGE_LABEL[b.kind] || b.kind)}"></button>`).join("")}</div>
       <div class="beat" id="beat" aria-live="polite"></div>
       <div class="stepnav">
         <button class="ghost" id="bprev">Back</button>
+        <button class="ghost" id="bplay" aria-pressed="false">▶ Play</button>
         <span class="counter" id="bcount"></span>
         <label class="speak"><input type="checkbox" id="speak"> Read aloud</label>
         <button id="bnext">Next</button>
@@ -344,7 +427,7 @@ function tutorLessonHtml(data, h) {
         <textarea id="pnote" rows="3" placeholder="The load balancer appeared before I felt the need for it…"></textarea>
         <button class="ghost" id="pnotebtn" style="margin-top:.5rem">Save note</button></div>
     </section>
-    ${c.sources.length ? `<p class="credit">Built from the best explanations found: ${c.sources.map((s) => `<a href="${h.esc(s.url)}" target="_blank" rel="noopener">${h.esc(s.title)}</a> (${h.esc(s.channel)})`).join(", ")}.</p>` : ""}`;
+    ${c.sources.length ? `<p class="credit">Built from the best explanations found: ${c.sources.map((s) => `<a href="#" data-yt="${h.esc(s.id)}" data-t="0">${h.esc(s.title)}</a> (${h.esc(s.channel)})`).join(", ")}.</p>` : ""}`;
 }
 
 function answerBox(item, key, h, canCheck) {
@@ -409,44 +492,110 @@ function mountTutorLesson(data, h) {
   const stage = new Stage(document.getElementById("stage2"), beats);
   const canCheck = course.provider !== "none" && course.engine_available;
   const opts = { lessonId: lesson.id, courseId: course.id, courseMode: course.mode };
-  let cur = 0;
-  const speakBox = document.getElementById("speak");
-  const say = (text) => {
-    if (!("speechSynthesis" in window)) return;
-    speechSynthesis.cancel();
-    if (speakBox.checked && text) speechSynthesis.speak(new SpeechSynthesisUtterance(text.replace(/[*`#]/g, "")));
+  const frames = c.frames || [];
+  const src0 = c.sources[0];
+  const anim = document.getElementById("animframe");
+  let cur = 0, playing = false, timer = null, utter = null;
+
+  if (anim) {
+    anim.srcdoc = c.animation;
+    anim.addEventListener("load", () => anim.contentWindow.postMessage({ type: "bt-step", step: cur }, "*"));
+    document.querySelectorAll(".viewtabs button").forEach((t) => {
+      t.onclick = () => {
+        const sceneView = t.dataset.view === "scene";
+        anim.hidden = sceneView;
+        document.getElementById("stage2").hidden = !sceneView;
+        document.querySelectorAll(".viewtabs button").forEach((x) => x.setAttribute("aria-selected", String(x === t)));
+        if (sceneView) { stage.mode = null; stage.show(cur); }
+      };
+    });
+  }
+
+  const frameFor = (k) => { for (let j = k; j >= 0; j--) if (beats[j].frame != null) return frames[beats[j].frame]; return null; };
+  const showFrame = (k) => {
+    const pane = document.getElementById("srcpane");
+    if (!pane) return;
+    const f = frameFor(k);
+    if (!f) { pane.innerHTML = `<div class="srcwait">The source's own visual appears here when the lesson reaches it.</div>`; pane.dataset.t = ""; return; }
+    if (pane.dataset.t === String(f.t)) return;
+    pane.dataset.t = String(f.t);
+    pane.innerHTML = `${f.clip ? `<video src="${h.esc(f.clip)}" poster="${h.esc(f.image)}" autoplay muted loop playsinline aria-label="Animated clip from the source"></video>`
+      : `<img src="${h.esc(f.image)}" alt="Frame from the source video at ${h.fmt(f.t)}">`}
+      <figcaption>From the source at ${h.fmt(f.t)}${src0 ? ` · <a href="#" data-yt="${h.esc(src0.id)}" data-t="${f.start}">Watch this moment</a>` : ""}</figcaption>`;
   };
-  speakBox.onchange = () => { if (!speakBox.checked && "speechSynthesis" in window) speechSynthesis.cancel(); else show(cur); };
-  if (!("speechSynthesis" in window)) speakBox.closest("label").hidden = true;
+
+  const speakBox = document.getElementById("speak");
+  const canSpeak = "speechSynthesis" in window;
+  if (!canSpeak) speakBox.closest("label").hidden = true;
+  const say = (text, onend) => {
+    if (!canSpeak) return false;
+    speechSynthesis.cancel();
+    if (!speakBox.checked || !text) return false;
+    utter = new SpeechSynthesisUtterance(text.replace(/[*`#]/g, ""));
+    const mine = utter;
+    utter.onend = () => { if (utter === mine && onend) onend(); };
+    speechSynthesis.speak(utter);
+    return true;
+  };
+  const playBtn = document.getElementById("bplay");
+  const stop = () => { playing = false; clearTimeout(timer); playBtn.textContent = "▶ Play"; playBtn.setAttribute("aria-pressed", "false"); };
+  const schedule = () => {
+    clearTimeout(timer);
+    if (!playing) return;
+    const b = beats[cur];
+    const next = () => {
+      if (!playing) return;
+      if (b.question) { stop(); h.toast("Your turn. Answer, then press Play to continue."); return; }
+      if (cur >= beats.length - 1) { stop(); document.getElementById("bnext").click(); return; }
+      show(cur + 1);
+    };
+    const spoken = say([b.text, b.question].filter(Boolean).join(" "), () => { timer = setTimeout(next, 700); });
+    if (!spoken) {
+      const words = [b.text, b.question].filter(Boolean).join(" ").split(/\s+/).length;
+      timer = setTimeout(next, Math.max(4500, words * 380));
+    }
+  };
+  playBtn.onclick = () => {
+    if (playing) { stop(); if (canSpeak) speechSynthesis.cancel(); return; }
+    playing = true; playBtn.textContent = "❚❚ Pause"; playBtn.setAttribute("aria-pressed", "true");
+    schedule();
+  };
+  speakBox.onchange = () => { if (!speakBox.checked && canSpeak) speechSynthesis.cancel(); };
+
   const show = (i) => {
     cur = Math.max(0, Math.min(beats.length - 1, i));
     const b = beats[cur];
-    stage.show(cur);
+    if (!anim || anim.hidden) stage.show(cur);
+    if (anim) { try { anim.contentWindow.postMessage({ type: "bt-step", step: cur }, "*"); } catch (_) { /* not loaded yet */ } }
+    showFrame(cur);
     const src = b.source && c.sources[b.source.idx];
     document.getElementById("beat").innerHTML = `
       <span class="stage-chip st-${h.esc(b.kind)}">${h.esc(STAGE_LABEL[b.kind] || b.kind)}</span>
       <div class="beat-text">${h.md(b.text)}</div>
       ${b.question ? answerBox(b, cur, h, canCheck) : ""}
-      ${src ? `<p class="small muted">See it explained in <a href="${h.esc(src.url)}&t=${b.source.t}s" target="_blank" rel="noopener">${h.esc(src.title)}</a> at ${h.fmt(b.source.t)}.</p>` : ""}`;
+      ${src ? `<p class="small muted">See it explained in <a href="#" data-yt="${h.esc(src.id)}" data-t="${b.source.t}">${h.esc(src.title)}</a> at ${h.fmt(b.source.t)}.</p>` : ""}`;
     const box = document.querySelector("#beat .askbox");
     if (box) wireAnswerBox(box, b, { ...opts, target: { beat: cur } }, h);
     document.getElementById("bcount").textContent = `${cur + 1} of ${beats.length}`;
     document.getElementById("bprev").disabled = cur === 0;
     document.getElementById("bnext").textContent = cur === beats.length - 1 ? "Finish" : "Next";
     document.querySelectorAll(".beats-bar button").forEach((x, j) => { x.setAttribute("aria-selected", String(j === cur)); x.classList.toggle("seen", j <= cur); });
-    say([b.text, b.question].filter(Boolean).join(" "));
+    if (playing) schedule();
+    else say([b.text, b.question].filter(Boolean).join(" "));
   };
-  document.getElementById("bprev").onclick = () => show(cur - 1);
+  document.getElementById("bprev").onclick = () => { stop(); show(cur - 1); };
   document.getElementById("bnext").onclick = () => {
     if (cur === beats.length - 1) {
+      stop();
       const a = document.getElementById("after"); a.hidden = false; a.scrollIntoView({ behavior: "smooth", block: "start" });
     } else show(cur + 1);
   };
-  document.querySelectorAll(".beats-bar button").forEach((b) => { b.onclick = () => show(+b.dataset.i); });
+  document.querySelectorAll(".beats-bar button").forEach((b) => { b.onclick = () => { stop(); show(+b.dataset.i); }; });
   h.setKeys((e) => {
     if (/input|textarea|select/i.test(document.activeElement?.tagName || "")) return;
     if (e.key === "ArrowRight") document.getElementById("bnext").click();
-    if (e.key === "ArrowLeft") show(cur - 1);
+    if (e.key === "ArrowLeft") document.getElementById("bprev").click();
+    if (e.key === " ") { e.preventDefault(); playBtn.click(); }
   });
   if (c.challenge) {
     const host = document.getElementById("challenge");
@@ -458,6 +607,7 @@ function mountTutorLesson(data, h) {
     try { await h.api("/api/protocol/notes", { method: "POST", body: { text: t.value, lesson_id: lesson.id } }); t.value = ""; h.toast("Saved to your protocol notes"); }
     catch (ex) { h.toast(ex.message); }
   };
+  h.onLeave(stop);
   show(0);
 }
 

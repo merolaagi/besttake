@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS protocol_notes(id INTEGER PRIMARY KEY, user_id INTEGE
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, user_id INTEGER, lesson_id INTEGER, beat INTEGER, answer TEXT,
   verdict TEXT, feedback TEXT, missing TEXT, created_at REAL);
 CREATE INDEX IF NOT EXISTS ix_answers_user ON answers(user_id, lesson_id);
+CREATE TABLE IF NOT EXISTS saved(user_id INTEGER, lesson_id INTEGER, created_at REAL, PRIMARY KEY(user_id, lesson_id));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT, updated_at REAL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, course_id INTEGER, ts REAL, msg TEXT);
 CREATE INDEX IF NOT EXISTS ix_lessons_course ON lessons(course_id);
@@ -70,6 +71,8 @@ def init():
         add_col("courses", "plan", "TEXT")
         add_col("courses", "protocol_version", "INTEGER")
         add_col("lessons", "meta", "TEXT")
+        add_col("users", "background", "TEXT")
+        add_col("users", "goals", "TEXT")
         ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         if "is_owner" not in ucols:
             c.execute("ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0")

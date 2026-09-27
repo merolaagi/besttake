@@ -343,3 +343,48 @@ button.small { padding: .3rem .7rem; font-size: .85rem; }
 .notes p { margin: 0 0 .2rem; }
 .protocol textarea { font: 14px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
 details.jury summary { cursor: pointer; list-style: none; }
+
+/* v0.4: dual view, animation, sequence, flowchart kinds, modal, profile */
+.titlerow { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.savebtn { flex: 0 0 auto; margin-top: .6rem; }
+.savebtn[aria-pressed="true"] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 30%, var(--surface)); }
+.viewtabs { display: inline-flex; border: 1.5px solid var(--line); border-radius: var(--radius-s); overflow: hidden; margin-bottom: .6rem; }
+.viewtabs button { border: 0; border-radius: 0; background: var(--surface); color: var(--ink); font-weight: 700; padding: .4rem .9rem; }
+.viewtabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); }
+.duo { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: .8rem; align-items: stretch; }
+.duo.solo { grid-template-columns: 1fr; }
+.pane { min-width: 0; }
+.pane .stage2 { height: 100%; }
+.animframe { width: 100%; aspect-ratio: 16 / 9; border: 1.5px solid var(--line); border-radius: var(--radius-m); background: #fff; display: block; }
+.srcpane { margin: 0; background: #0E1014; border-radius: var(--radius-m); overflow: hidden; display: flex; flex-direction: column; min-height: 220px; }
+.srcpane img, .srcpane video { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; display: block; background: #0E1014; }
+.srcpane figcaption { color: #D8DAE0; font-size: .82rem; padding: .5rem .7rem; margin-top: auto; }
+.srcpane figcaption a { color: #fff; }
+.srcwait { color: #A2A7B2; font-size: .9rem; padding: 1.2rem; margin: auto; text-align: center; }
+.kind-start .shape { fill: var(--k-db); }
+.kind-end .shape { fill: color-mix(in srgb, var(--danger) 14%, var(--surface)); }
+.kind-decision .shape { fill: var(--k-cache); }
+.kind-io .shape { fill: var(--k-queue); }
+.kind-step .shape { fill: var(--k-service); }
+.lifeline { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 5; }
+.msg .edge-line { stroke: var(--ink); }
+.msg.reply .edge-line { stroke-dasharray: 6 5; stroke: var(--muted); }
+.msg.fresh .edge-line { stroke: var(--cobalt); stroke-width: 2.6; }
+.msg.fresh .edge-label { fill: var(--cobalt); font-weight: 700; }
+.msg.draw .edge-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: drawline .7s ease forwards; }
+.trace-dot { fill: var(--marker); stroke: var(--ink); stroke-width: 1.5; }
+.vmodal { position: fixed; inset: 0; z-index: 50; background: rgba(10, 12, 16, .78); display: grid; place-items: center;
+  padding: calc(1rem + env(safe-area-inset-top, 0px)) 1rem calc(1rem + env(safe-area-inset-bottom, 0px)); }
+.vbox { width: min(1000px, 100%); }
+.vclose { background: var(--paper); margin-bottom: .6rem; }
+.vframe { position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius-m); overflow: hidden; background: #000; }
+.vframe iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.statrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .8rem; margin: 1.2rem 0; }
+.statrow div { background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--radius-m); padding: .9rem 1rem; }
+.statrow b { display: block; font: 800 1.7rem var(--display); }
+.statrow span { color: var(--muted); font-size: .88rem; }
+.library { list-style: none; padding: 0; margin: 0; }
+.library li { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: .55rem 0; border-top: 1px solid var(--line); }
+.library a { font-weight: 700; }
+.profile form.block { border-top: 1px solid var(--line); padding-top: 1.2rem; }
+@media (max-width: 880px) { .duo { grid-template-columns: 1fr; } }

@@ -496,12 +496,25 @@ def _thumbs(paths: list) -> list[str]:
 
 # ---------------- Tutor mode ----------------
 
+def learner_profile(user_id: int) -> str:
+    with db() as c:
+        row = c.execute("SELECT name, background, goals FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return ""
+    parts = []
+    if row["background"]:
+        parts.append(f"already knows / background: {row['background'][:800]}")
+    if row["goals"]:
+        parts.append(f"goals: {row['goals'][:400]}")
+    return "; ".join(parts)
+
+
 def plan_tutor(course: dict):
     provider = course.get("provider") or "anthropic"
     n = DEPTHS.get(course.get("depth") or "standard", 12)
     plan0 = json.loads(course.get("plan") or "{}")
     proto = protocol.active(course["user_id"])
-    data = tutor.plan(course, proto["text"], provider, n, plan0.get("user_lessons"))
+    data = tutor.plan(course, proto["text"], provider, n, plan0.get("user_lessons"), learner_profile(course["user_id"]))
     ctx = heuristics.topic_context(course["topic"])
     ctx_kw = set(heuristics.keywords(ctx))
     for m in data.get("modules") or []:
@@ -535,20 +548,21 @@ def build_tutor_lesson(course: dict, lesson: dict):
         results = []
     srcs = [r["meta"] for r in results if r["rel"] >= 0.3][:2] or [r["meta"] for r in results[:1]]
 
-    frame_notes, images = [], []
+    frame_notes, images, frames = [], [], []
     _set_lesson(lid, status="extracting")
     try:
         if not srcs:
             raise RuntimeError("no source video")
         steps = media.extract(srcs[0], concepts, title, log=lambda msg: log(cid, msg))
-        if len(steps) > 8:
-            steps = [steps[round(i * (len(steps) - 1) / 7)] for i in range(8)]
+        if len(steps) > 10:
+            steps = [steps[round(i * (len(steps) - 1) / 9)] for i in range(10)]
+        frames = steps
         paths = [(s["t"], media.MEDIA_DIR / srcs[0]["id"] / Path(s["image"]).name) for s in steps]
         if provider == "anthropic":
             images = _thumbs([p for _, p in paths])
         elif provider == "ollama" and llm.ollama_status().get("vision"):
             log(cid, f"Reading {len(paths)} key frames with the vision model")
-            frame_notes = tutor.caption_frames([(t, str(p)) for t, p in paths])
+            frame_notes = tutor.caption_frames([(t, str(p)) for t, p in paths[:6]])
     except Exception as e:
         if _fatal(e):
             raise
@@ -572,14 +586,25 @@ def build_tutor_lesson(course: dict, lesson: dict):
     proto = protocol.active(course["user_id"])
 
     content = None
+    learner = learner_profile(course["user_id"])
     for attempt in range(2):
-        data = tutor.design(course, plan_data, lesson, meta, prior, srcs, frame_notes, images, proto["text"], provider)
-        content = tutor.clean_lesson(data, srcs)
+        data = tutor.design(course, plan_data, lesson, meta, prior, srcs, frame_notes, images, proto["text"], provider,
+                            frames=frames, learner=learner)
+        content = tutor.clean_lesson(data, srcs, frames)
         if len(content["beats"]) >= 4:
             break
         log(cid, f"The design for “{title}” was too thin; asking again")
     if not content or len(content["beats"]) < 3:
         raise RuntimeError("The model did not produce a usable lesson. Try again, or switch engines.")
     content["chain"] = {k: meta.get(k) or "" for k in ("stage", "pressure", "problem", "property", "mechanism")}
+    if provider == "anthropic":
+        _set_lesson(lid, status="animating")
+        log(cid, f"Animating “{title}”")
+        try:
+            content["animation"] = tutor.animation(course, lesson, content, provider)
+        except Exception as e:
+            if _fatal(e):
+                raise
+            log(cid, f"Custom animation skipped for “{title}”: {str(e)[:120]}")
     _set_lesson(lid, status="ready", content=json.dumps(content))
     log(cid, f"“{title}” is ready: {len(content['beats'])} beats, {sum(1 for b in content['beats'] if b.get('question'))} questions")
